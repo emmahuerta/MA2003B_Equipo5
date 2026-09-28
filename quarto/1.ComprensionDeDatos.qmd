@@ -1,0 +1,560 @@
+---
+title: "Etapa 1 · Comprensión de los datos, diagnóstico de calidad e imputación"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    df-print: paged
+execute:
+  warning: false
+  message: false
+---
+
+**Estructura (CRISP-DM, etapa 2):**
+
+1. Comprensión de los datos: dimensión, diccionario de variables y catálogo de estaciones.
+2. Calidad de los datos: faltantes, espurios/erróneos, consistencia física y duplicados.
+3. Imputación: diagnóstico de huecos, estrategia justificada, validación por enmascaramiento sintético y aplicación.
+
+# Configuración y paquetes
+
+Se cargan los paquetes y se fijan los parámetros que controlan todo el análisis. Concentrarlos en un solo chunk permite cambiar decisiones (por ejemplo, el umbral que separa una variable "no medida" de una con fallas) sin tocar el resto del código.
+
+- `tidyverse`: manipulación y gráficos. `readxl` / `data.table`: lectura de Excel / CSV grandes.
+- `imputeTS`: imputación de series de tiempo [@moritz2017].
+- `lubridate`: fechas. `scales` y `knitr`: formato de tablas y números.
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(imputeTS)
+library(scales)
+library(knitr)
+
+theme_set(theme_minimal(base_size = 11))
+set.seed(2026)                       # reproducibilidad (enmascaramiento sintético)
+
+# ---- Parámetros del análisis ------------------------------------------------
+ruta_datos          <- "../data/BD_2020_2025_concatenada.xlsx"  # cambiar por la base concatenada 2020-2025
+formato             <- "excel_hojas"         # "excel_hojas" (1 hoja por estación) o "csv_largo"
+umbral_estructural  <- 95    # % de NA anual desde el cual una variable se considera "no medida"
+umbral_cobertura    <- 50    # % de NA anual desde el cual la cobertura se considera "baja"
+huecos_cortos       <- 6     # horas: límite del nivel 1 de imputación
+huecos_medios       <- 72    # horas: límite del nivel 2 de imputación
+anio_benchmark      <- 2020  # año usado para validar los métodos de imputación
+dir.create("salidas", showWarnings = FALSE)
+```
+
+# Comprensión de los datos
+
+## Lectura y estandarización de la base
+
+La base de SIMA llega en el sigueinte formato: cada hoja de Excel es una estación y cada fila una hora. Para analizarla como una sola tabla se leen todas las hojas, se agrega una columna `estacion` con el nombre de la hoja y se apilan (formato *largo por estación*, una fila = una estación en una hora).
+
+También se estandarizan los nombres: `Fecha y hora` pasa a `fecha`, `PM2.5` a `PM25` (un punto en el nombre complica el código en R) y `NOX`/`NOx` a `NOX`. La zona horaria se fija en UTC para que los cambios de horario de verano no creen horas duplicadas o inexistentes artificiales (los datos son horas locales "de reloj" sin zona).
+
+```{r}
+#| label: lectura
+leer_bd <- function(ruta, formato) {
+  if (formato == "excel_hojas") {
+    excel_sheets(ruta) |>
+      map_dfr(\(h) read_excel(ruta, sheet = h, guess_max = 1e6) |>  
+                 mutate(estacion = h, .before = 1))
+  } else {
+    data.table::fread(ruta) |> as_tibble()
+  }
+}
+
+crudo <- leer_bd(ruta_datos, formato) |>
+  rename_with(\(n) case_when(
+    n %in% c("Fecha y hora", "Fecha", "fecha", "datetime") ~ "fecha",
+    n %in% c("PM2.5", "PM25") ~ "PM25",
+    toupper(n) == "NOX" ~ "NOX",
+    TRUE ~ n
+  )) |>
+  mutate(
+    fecha = force_tz(as.POSIXct(fecha), "UTC"),
+    anio = year(fecha),
+    .after = fecha
+  ) |>
+  select(-date, -`...18`)
+
+vars <- c("CO","NO","NO2","NOX","O3","PM10","PM25","SO2",      # contaminantes
+          "TOUT","RH","SR","RAINF","PRS","WSR","WDR")           # meteorología
+stopifnot(all(vars %in% names(crudo)))
+glimpse(crudo)
+```
+
+Se verifica abajo que las 15 variables quedaron numéricas.
+
+```{r}
+#| label: verificar-tipos
+tipos <- crudo |> select(all_of(vars)) |> map_chr(\(x) class(x)[1])
+stopifnot(all(tipos == "numeric"))
+table(tipos)
+```
+
+```{r}
+# Antes de convertir, mira el contexto de los 999
+crudo |> filter(PM10 == 999 | PM25 == 999) |> select(estacion, fecha, PM10, PM25)
+
+# Conversión: -9999 en todas las variables; 999 solo en PM10 y PM25
+crudo <- crudo |>
+  mutate(across(all_of(vars), \(x) replace(x, x %in% -9999, NA_real_)),
+         across(c(PM10, PM25), \(x) replace(x, x %in% 999, NA_real_)))
+```
+
+## Dimensión del dataset
+
+Se reporta el número de registros (filas), columnas, estaciones, periodo cubierto y el número de celdas de medición (registros × variables). Un registro es *una estación en una hora*.
+
+```{r}
+#| label: dimension
+dimension <- tibble(
+  Registros              = nrow(crudo),
+  Columnas               = ncol(crudo),
+  `Variables de medición`= length(vars),
+  Estaciones             = n_distinct(crudo$estacion),
+  Inicio                 = min(crudo$fecha),
+  Fin                    = max(crudo$fecha),
+  `Celdas de medición`   = nrow(crudo) * length(vars)
+)
+dimension |> mutate(across(where(is.numeric), \(x) comma(x))) |> t() |>
+  kable(col.names = "Valor", caption = "Dimensión de la base cargada")
+```
+
+Nota: `Columnas` incluye `estacion` y `anio`, columnas que agregamos nosotros; la base original de cada hoja tiene 16 columnas (`Fecha y hora` + 15 variables).
+
+## Integridad del índice temporal: horas ausentes y duplicados
+
+ Se cuenta, por estación, cuántas horas existen, cuántas faltan como *filas ausentes* (distinto de una fila presente con valores vacíos) y si hay marcas de tiempo duplicadas.
+
+```{r}
+#| label: indice-temporal
+integridad <- crudo |>
+  group_by(estacion) |>
+  summarise(
+    filas          = n(),
+    fechas_unicas  = n_distinct(fecha),
+    duplicadas     = filas - fechas_unicas,
+    primera        = min(fecha), ultima = max(fecha),
+    esperadas      = as.integer(difftime(ultima, primera, units = "hours")) + 1L,
+    horas_ausentes = esperadas - fechas_unicas,
+    .groups = "drop")
+kable(integridad, caption = "Integridad del índice horario por estación")
+
+cat("Filas completamente duplicadas en toda la base:", sum(duplicated(crudo)), "\n")
+```
+
+Para poder tratar los huecos como series de tiempo regulares, se **completa la extensión horaria** de cada estación, en donde las horas ausentes se insertan como filas con todas las variables en `NA`. Así, una hora ausente y una hora con sensor sin dato quedan representadas igual (ambas son *dato faltante*).
+
+```{r}
+#| label: malla
+malla <- crudo |>
+  group_by(estacion) |>
+  summarise(fecha = list(seq(min(fecha), max(fecha), by = "hour")), .groups = "drop") |>
+  unnest(fecha)
+
+datos <- malla |>
+  left_join(crudo |> distinct(estacion, fecha, .keep_all = TRUE), by = c("estacion", "fecha")) |>
+  mutate(anio = year(fecha), mes = month(fecha), hora = hour(fecha),
+         estacion = factor(estacion))
+
+cat("Filas tras completar el horario:", comma(nrow(datos)),
+    "| filas insertadas:", comma(nrow(datos) - nrow(crudo)), "\n")
+```
+
+## Catálogo de estaciones
+
+Las estaciones se describen combinando la Tabla 1 del archivo de etiquetas y el documento de ubicación con coordenadas y elevación de cada estación. La elevación importa para el análisis posterior, ya que afecta la presión atmosférica y la dispersión de contaminantes (por ejemplo, SO y NO2 están a 674 y 702 msnm, mientras SE3 está a 334 msnm).
+
+```{r}
+#| label: catalogo
+dms <- function(s) {                       # "25°39’55’’N" -> grados decimales
+  p <- as.numeric(str_extract_all(s, "[0-9]+")[[1]])
+  signo <- if (str_detect(s, "[SW]")) -1 else 1
+  signo * (p[1] + p[2]/60 + p[3]/3600)
+}
+catalogo <- tribble(
+  ~clave, ~zona,        ~estacion_nombre, ~municipio,                 ~lat_dms,        ~lon_dms,         ~msnm,
+  "SE",   "Sureste",    "La Pastora",     "Guadalupe",                "25°39’55’’N",   "100°14’37’’W",   500,
+  "NE",   "Noreste",    "San Nicolás",    "San Nicolás de los Garza", "25°44’41’’N",   "100°15’11’’W",   474,
+  "CE",   "Centro",     "Obispado",       "Monterrey",                "25°40’33’’N",   "100°20’18’’W",   562,
+  "NO",   "Noroeste",   "San Bernabé",    "Monterrey",                "25°45’46’’N",   "100°22’09’’W",   568,
+  "SO",   "Suroeste",   "Santa Catarina", "Santa Catarina",           "25°40’32’’N",   "100°27’29’’W",   674,
+  "NO2",  "Noroeste 2", "García",         "García",                   "25°48’01’’N",   "100°35’04’’W",   702,
+  "NTE",  "Norte",      "Escobedo",       "Escobedo",                 "25°47’55’’N",   "100°19’38’’W",   503,
+  "NE2",  "Noreste 2",  "Apodaca",        "Apodaca",                  "25°46’38’’N",   "100°11’17’’W",   432,
+  "SE2",  "Sureste 2",  "Juárez",         "Juárez",                   "25°38’45’’N",   "100°05’43’’W",   387,
+  "SO2",  "Suroeste 2", "San Pedro",      "San Pedro Garza García",   "25°39’54’’N",   "100°24’46’’W",   636,
+  "SE3",  "Sureste 3",  "Cadereyta",      NA,                         "25°36’04’’N",   "99°59’57’’W",    334,
+  "SUR",  "Sur",        "Pueblo Serena",  NA,                         "25°37’01’’N",   "100°16’26’’W",   555,
+  "NTE2", "Norte 2",    "Universidad",    NA,                         "25°43’47’’N",   "100°18’36’’W",   520,
+  "NE3",  "Noreste 3",  NA,               NA,                         "25°47’26’’N",   "100°04’42’’W",   346,
+  "NO3",  "Noroeste 3", NA,               NA,                         "25°46’06’’N",   "100°27’49’’W",   607
+) |>
+  mutate(lat = map_dbl(lat_dms, dms), lon = map_dbl(lon_dms, dms))
+
+catalogo |>
+  select(clave, zona, estacion_nombre, municipio, lat, lon, msnm) |>
+  kable(digits = 4, caption = "Catálogo de estaciones (NA = dato no indicado en la documentación)")
+```
+
+## Diccionario de variables
+
+El diccionario se arma a partir de las Tablas 2 y 3 del archivo de etiquetas, y se complementa con estadísticos calculados de la base (número de observaciones, % de nulos y rango observado). 
+
+```{r}
+#| label: diccionario
+descr <- tribble(
+  ~variable, ~nombre,                        ~grupo,           ~unidad,   ~tipo,
+  "CO",   "Monóxido de carbono",             "Contaminante",   "ppm",     "Numérica continua",
+  "NO",   "Monóxido de nitrógeno",           "Contaminante",   "ppb",     "Numérica continua",
+  "NO2",  "Dióxido de nitrógeno",            "Contaminante",   "ppb",     "Numérica continua",
+  "NOX",  "Óxidos de nitrógeno (NO + NO2)",  "Contaminante",   "ppb",     "Numérica continua",
+  "O3",   "Ozono",                           "Contaminante",   "ppb",     "Numérica continua",
+  "PM10", "Partículas < 10 µm",              "Contaminante",   "µg/m3",   "Numérica continua",
+  "PM25", "Partículas < 2.5 µm",             "Contaminante",   "µg/m3",   "Numérica continua",
+  "SO2",  "Dióxido de azufre",               "Contaminante",   "ppb",     "Numérica continua",
+  "TOUT", "Temperatura",                     "Meteorológica",  "°C",      "Numérica continua",
+  "RH",   "Humedad relativa",                "Meteorológica",  "%",       "Numérica continua (0–100)",
+  "SR",   "Radiación solar",                 "Meteorológica",  "kW/m2",   "Numérica continua (cero de noche)",
+  "RAINF","Precipitación",                   "Meteorológica",  "mm/h",    "Numérica semicontinua (mayoría ceros)",
+  "PRS",  "Presión atmosférica",             "Meteorológica",  "mm Hg",   "Numérica continua",
+  "WSR",  "Velocidad del viento",            "Meteorológica",  "km/h",    "Numérica continua (> 0)",
+  "WDR",  "Dirección del viento",            "Meteorológica",  "°",       "Numérica circular (0–360)"
+)
+
+estad <- map_dfr(vars, \(v) {
+  x <- datos[[v]]
+  tibble(variable = v, n_obs = sum(!is.na(x)), pct_nulos = mean(is.na(x)) * 100,
+         min = min(x, na.rm = TRUE), q1 = quantile(x, .25, na.rm = TRUE),
+         mediana = median(x, na.rm = TRUE), media = mean(x, na.rm = TRUE),
+         q3 = quantile(x, .75, na.rm = TRUE), max = max(x, na.rm = TRUE),
+         sd = sd(x, na.rm = TRUE), pct_ceros = mean(x == 0, na.rm = TRUE) * 100)
+})
+
+diccionario <- descr |> left_join(estad, by = "variable")
+diccionario |>
+  select(variable, nombre, grupo, unidad, tipo, n_obs, pct_nulos, min, mediana, media, max) |>
+  kable(digits = 2, format.args = list(big.mark = ","),
+        caption = "Diccionario de variables con estadísticos observados (antes de limpiar)")
+```
+
+Además de las 15 variables de medición, la base contiene tres columnas de identificación: `fecha` (fecha-hora, horaria, tipo `POSIXct`), `estacion` (categórica nominal; una clave de la tabla anterior) y, derivadas por nosotros, `anio`, `mes`, `hora`.
+
+
+# Calidad de los datos
+
+## Valores faltantes
+
+### Panorama global y por variable
+
+Primero se mide el porcentaje de nulos por variable sobre toda la malla horaria (incluyendo las horas ausentes insertadas).
+
+```{r}
+#| label: na-global
+na_var <- diccionario |>
+  select(variable, grupo, pct_nulos) |>
+  arrange(desc(pct_nulos))
+
+ggplot(na_var, aes(reorder(variable, pct_nulos), pct_nulos, fill = grupo)) +
+  geom_col() + coord_flip() +
+  geom_text(aes(label = sprintf("%.1f%%", pct_nulos)), hjust = -.1, size = 3) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = c(0, .05))) +
+  labs(x = NULL, y = "% de valores faltantes", fill = NULL,
+       title = "Faltantes por variable (toda la red)")
+
+cat("% total de celdas de medición vacías:",
+    sprintf("%.1f%%", mean(is.na(as.matrix(datos[vars]))) * 100), "\n")
+```
+
+### Faltantes por estación, variable y año: ¿falla o "no se mide"?
+
+El porcentaje global nos puede mostrar qu **no todas las estaciones miden todos los contaminantes**. Una estación con 100 % de nulos en NO2 durante un año probablemente *no tiene ese analizador*; es una ausencia **estructural**, no una falla. Este tipo de faltante no se puede ni se debe imputar con series de tiempo, porque no hay información observada de esa serie. En cambio, una estación con 15 % de nulos tiene fallas intermitentes, que sí son candidatas a imputación.
+
+Se clasifica cada combinación *estación × variable × año* usando los umbrales de configuración:
+
+  | Clase | Regla |
+  |---|---|
+  | No medida | % NA ≥ 95 |
+  | Cobertura baja | 50 ≤ % NA < 95 |
+  | Utilizable | % NA < 50 |
+
+```{r}
+#| label: cobertura
+cobertura <- map_dfr(vars, \(v) {
+  datos |> group_by(estacion, anio) |>
+    summarise(variable = v, pct_na = mean(is.na(.data[[v]])) * 100, .groups = "drop")
+}) |>
+  mutate(clase = case_when(pct_na >= umbral_estructural ~ "No medida",
+                           pct_na >= umbral_cobertura   ~ "Cobertura baja",
+                           TRUE                         ~ "Utilizable"),
+         clase = factor(clase, c("Utilizable", "Cobertura baja", "No medida")),
+         variable = factor(variable, vars))
+
+ggplot(cobertura, aes(variable, estacion, fill = pct_na)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(pct_na)), size = 2.3) +
+  scale_fill_gradient(low = "#e8f4ea", high = "#b2182b", limits = c(0, 100)) +
+  facet_wrap(~anio) +
+  labs(x = NULL, y = NULL, fill = "% NA",
+       title = "Faltantes por estación y variable") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cobertura |> count(clase) |> mutate(pct = percent(n / sum(n), .1)) |>
+  kable(caption = "Combinaciones estación × variable × año por clase de cobertura")
+```
+
+```{r}
+#| label: no-medidas
+cobertura |> filter(clase == "No medida") |>
+  arrange(estacion, variable) |>
+  group_by(estacion, anio) |>
+  summarise(variables_no_medidas = paste(variable, collapse = ", "), .groups = "drop") |>
+  kable(caption = "Variables consideradas 'no medidas' por estación y año")
+```
+
+**Implicación para el modelado:** las 15 variables no están disponibles en las 13–15 estaciones. Para un análisis multivariado (PCA, análisis de factores, discriminante) se necesita un conjunto de variables observado *simultáneamente*; esto se retomará en la selección de datos, pero conviene tenerlo presente desde aquí: la estructura de faltantes condiciona **qué estaciones y qué variables** entran juntas al modelo.
+
+### ¿Cuándo faltan? Patrón temporal de los faltantes
+
+Si los faltantes se concentran en ciertos meses u horas, no son aleatorios y una imputación ingenua sesga. Se resume el % de NA por mes, considerando solo series utilizables (se excluyen las "no medidas" para no inflar el patrón con ausencias estructurales).
+
+```{r}
+#| label: na-mes
+utilizables <- cobertura |> filter(clase != "No medida") |> select(estacion, anio, variable)
+
+na_mes <- map_dfr(vars, \(v) {
+  datos |> select(estacion, anio, mes, x = all_of(v)) |>
+    semi_join(utilizables |> filter(variable == v), by = c("estacion", "anio")) |>
+    group_by(mes) |> summarise(variable = v, pct_na = mean(is.na(x)) * 100, .groups = "drop")
+})
+
+ggplot(na_mes, aes(factor(mes), factor(variable, rev(vars)), fill = pct_na)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(pct_na)), size = 2.5) +
+  scale_fill_gradient(low = "#f7fbff", high = "#08519c") +
+  labs(x = "Mes", y = NULL, fill = "% NA",
+       title = "Faltantes por mes (solo series medidas)")
+```
+
+Si un mes tiene mucho más NA que otros (por ejemplo, por calibraciones, mantenimiento o fallas de comunicación concentradas), el mecanismo de datos faltantes no es completamente aleatorio (MCAR) sino, en el mejor caso, aleatorio condicionado a variables observadas (MAR) [@rubin1976]. Esto **no se puede demostrar con los datos**, solo se argumenta; por eso la estrategia de imputación se valida con enmascaramiento sintético (sección de imputación).
+
+### Longitud de los huecos
+
+Lo que decide *cómo* imputar no es cuántos datos faltan, sino **cuán largos son los huecos consecutivos**. Un hueco de 2 horas se rellena con interpolación; uno de 3 semanas exige información de otras fuentes (otras estaciones, otras variables). Se calcula la longitud de cada racha de NA consecutivos en cada serie utilizable.
+
+```{r}
+#| label: huecos
+long_huecos <- function(x) { r <- rle(is.na(x)); r$lengths[r$values] }
+
+huecos <- map_dfr(vars, \(v) {
+  datos |> select(estacion, anio, x = all_of(v)) |>
+    semi_join(utilizables |> filter(variable == v), by = c("estacion", "anio")) |>
+    group_by(estacion, anio) |>
+    summarise(l = list(long_huecos(x)), .groups = "drop") |>
+    unnest(l) |> mutate(variable = v)
+})
+
+resumen_huecos <- huecos |>
+  group_by(variable) |>
+  summarise(n_huecos      = n(),
+            horas_en_hueco= sum(l),
+            mediana_h     = median(l),
+            `% <= 6 h`    = mean(l <= huecos_cortos) * 100,
+            `% 7-72 h`    = mean(l > huecos_cortos & l <= huecos_medios) * 100,
+            `% > 72 h`    = mean(l > huecos_medios) * 100,
+            `% de horas faltantes en huecos > 72 h` = sum(l[l > huecos_medios]) / sum(l) * 100,
+            maximo_h      = max(l), .groups = "drop") |>
+  arrange(match(variable, vars))
+kable(resumen_huecos, digits = 1, format.args = list(big.mark = ","),
+      caption = "Longitud de huecos por variable (solo series medidas)")
+```
+
+Se distinguen dos lecturas: la mayoría de los **huecos** son cortos (`% <= 6 h`), pero lo que pesa en **horas faltantes** son los pocos huecos muy largos (`% de horas faltantes en huecos > 72 h`). Esta doble mirada justifica una estrategia en **niveles** según la longitud del hueco.
+
+```{r}
+#| label: huecos-plot
+huecos |>
+  mutate(cat = cut(l, c(0, 3, 6, 24, 72, 168, Inf),
+                   labels = c("1-3 h", "4-6 h", "7-24 h", "25-72 h", "3-7 días", "> 7 días")),
+         variable = factor(variable, vars)) |>
+  group_by(variable, cat) |> summarise(horas = sum(l), .groups = "drop") |>
+  ggplot(aes(variable, horas, fill = cat)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_brewer(palette = "YlOrRd") +
+  labs(x = NULL, y = "% de las horas faltantes", fill = "Longitud del hueco",
+       title = "¿De qué tipo de hueco provienen las horas faltantes?")
+```
+
+## Valores espurios o erróneos
+
+### Rangos de operación de SIMA
+
+SIMA define, para cada año, el **rango de operación** (valores posibles de la medición) y el **rango del fabricante** (valores que puede medir el sensor). Un valor fuera del rango de operación se considera inválido según el protocolo de SIMA; uno fuera del rango del fabricante es *físicamente imposible* para ese sensor. Las notas del documento agregan reglas puntuales (por ejemplo, 2020: "omitir máximo de O3 en NTE2", "no considerar WSR > 75 km/h", "no considerar BP fuera de rango"), que quedan cubiertas al aplicar los rangos.
+
+Se transcriben las tablas del documento (verificadas contra la imagen original) y se renombran las variables con los nombres de esta base (`WS`→`WSR`, `TEMP`→`TOUT`, `BP`→`PRS`, `WD`→`WDR`, `NOx`→`NOX`).
+
+```{r}
+#| label: rangos
+rangos_op <- tribble(
+  ~anio, ~PM10, ~PM25, ~O3, ~NO, ~NO2, ~NOX, ~SO2, ~CO, ~RH, ~WSR, ~TOUT,  ~SR,   ~PRS,   ~WDR, ~RAINF,
+  "2020","0,800","0,205.94","0,153","0,500","0,200","0,500","0,200","0,20","0,100","0,75","0,41","0,1","690,750","0,360","0,30",
+  "2021","0,800","0,325","0,175","0,350","0,100","0,400","0,300","0,10","0,100","0,40","-6.5,45","0,1","690,740","0,360","0,80",
+  "2022","0,999","0,450","0,160","0,400","0,175","0,420","0,200","0,8","0,100","0,35","-5,45","0,1.25","700,740","0,360","0,25",
+  "2023","0,900","0,800","0,175","0,500","0,175","0,500","0,250","0,14","0,100","0,40","0,45","0,1","690,740","0,360","0,70",
+  "2024","0,999","0,999","0,180","0,400","0,130","0,500","0,150","0,18","0,100","0,38","-4,45.5","0,1.26","687.5,740","0,360","0,50",
+  "2025","0,820","0,350","0,185","0,350","0,175","0,400","0,405","0,10","0,100","0,40","-4.5,45","0,1.2","688,740","0,360","0,25"
+) |>
+  pivot_longer(-anio, names_to = "variable", values_to = "rango") |>
+  separate(rango, c("min", "max"), sep = ",(?=[^,]*$)", convert = TRUE) |>
+  mutate(anio = as.integer(anio))
+
+rangos_fab <- tribble(       # rango del fabricante (una sola fila para todos los años)
+  ~variable, ~min_fab, ~max_fab,
+  "PM10", 0, 1000, "PM25", 0, 1000, "O3", 0, 1000, "NO", 0, 500, "NO2", 0, 500,
+  "NOX", 0, 500, "SO2", 0, 500, "CO", 0, 50, "RH", 0, 100, "WSR", 0, 180,
+  "TOUT", -50, 50, "SR", 0, 1.4, "PRS", 449.9, 824.9, "WDR", 0, 360
+)
+rangos_op |> filter(anio == min(anio)) |> kable(caption = "Rangos de operación del primer año (ejemplo)")
+```
+
+La presión atmosférica depende de la altitud de cada estación, por lo que un rango único para toda la red no es adecuado. Para PRS se usa la mediana de cada estación como referencia y una tolerancia, además del rango del fabricante. El histograma sirve para elegir la tolerancia.
+
+```{r}
+#| label: prs-referencia
+tol_prs <- 25   # mmHg; ajustar según el histograma
+
+prs_ref <- datos |>
+  filter(!is.na(PRS), PRS >= 449.9, PRS <= 824.9) |>
+  group_by(estacion) |>
+  summarise(prs_mediana = median(PRS), .groups = "drop")
+
+datos |>
+  filter(!is.na(PRS), PRS >= 449.9) |>
+  left_join(prs_ref, by = "estacion") |>
+  ggplot(aes(PRS - prs_mediana)) +
+  geom_histogram(bins = 100) +
+  geom_vline(xintercept = c(-tol_prs, tol_prs), linetype = "dashed", color = "red") +
+  facet_wrap(~estacion, scales = "free_y") +
+  coord_cartesian(xlim = c(-60, 60)) +
+  labs(x = "PRS − mediana de la estación (mmHg)", y = "Horas")
+```
+
+```{r}
+#| label: fuera-rango
+fuera_sima <- map_dfr(setdiff(vars, "PRS"), \(v) {
+  datos |> select(estacion, fecha, anio, valor = all_of(v)) |>
+    filter(!is.na(valor)) |>
+    inner_join(rangos_op |> filter(variable == v), by = "anio") |>
+    filter(valor < min | valor > max) |>
+    mutate(variable = v, sentido = if_else(valor < min, "bajo el mínimo", "sobre el máximo"))
+}) |>
+  left_join(rangos_fab, by = "variable") |>
+  mutate(imposible_fisico = !is.na(min_fab) & (valor < min_fab | valor > max_fab))
+
+fuera_prs <- datos |> select(estacion, fecha, anio, valor = PRS) |>
+  filter(!is.na(valor)) |>
+  left_join(prs_ref, by = "estacion") |>
+  filter(valor < 449.9 | valor > 824.9 | abs(valor - prs_mediana) > tol_prs) |>
+  transmute(estacion, fecha, anio, valor, variable = "PRS",
+            sentido = if_else(valor < prs_mediana, "bajo el mínimo", "sobre el máximo"),
+            min_fab = 449.9, max_fab = 824.9,
+            imposible_fisico = valor < 449.9 | valor > 824.9)
+
+fuera <- bind_rows(fuera_sima, fuera_prs)
+
+fuera |>
+  group_by(variable, sentido) |>
+  summarise(n = n(), imposibles_para_el_sensor = sum(imposible_fisico),
+            min_obs = min(valor), max_obs = max(valor), .groups = "drop") |>
+  left_join(estad |> select(variable, n_obs), by = "variable") |>
+  mutate(`% de observados` = n / n_obs * 100) |>
+  select(-n_obs) |>
+  kable(digits = 2, caption = "Valores fuera del rango de operación de SIMA")
+
+fuera |> count(variable, estacion, name = "n") |> arrange(desc(n)) |>
+  kable(caption = "¿Dónde se concentran los valores fuera de rango?")
+```
+
+
+Se interpreta cada caso por separado, porque no todos son iguales:
+
+- **Concentrados en una estación y un sensor** (por ejemplo, temperatura con valores de −50 a −67 °C en una sola estación durante semanas): es una **falla de sensor**, y estos valores ni siquiera caben en el rango del fabricante. Se eliminan sin discusión.
+- **Valores aislados extremos** (una radiación solar de 64 kW/m² cuando el máximo físico es ~1.4): error de registro. Se eliminan.
+- Presión atmosférica: el rango de operación de SIMA es único para toda la red, pero la presión depende de la altitud (en 2020 la mediana por estación correlaciona −0.82 con la elevación). Aplicarlo tal cual marcaría como inválidas lecturas normales de estaciones altas (SO, NO2) y bajas (SE3). Por eso, para PRS se usa la mediana de cada estación ± 25 mmHg más el rango del fabricante; la tolerancia se validará con el socio formador.
+
+### Consistencia física entre variables
+
+Algunas relaciones entre variables deben cumplirse siempre; su violación revela errores que un rango univariado no detecta:
+
+- `PM2.5 ≤ PM10` (las partículas finas son un subconjunto de las gruesas). Es el mismo criterio de consistencia que usan las autoras y autores del modelo de imputación MIMA.
+- `NOX ≈ NO + NO2` (así lo define el archivo de etiquetas). Se admite una tolerancia de 1 ppb por redondeo y por el hecho de que los tres se miden como promedio horario.
+
+```{r}
+#| label: consistencia
+pm <- datos |> filter(!is.na(PM10), !is.na(PM25))
+nox <- datos |> filter(!is.na(NO), !is.na(NO2), !is.na(NOX)) |>
+  mutate(dif = NOX - (NO + NO2))
+
+bind_rows(
+  tibble(regla = "PM2.5 <= PM10", evaluables = nrow(pm),
+         violaciones = sum(pm$PM25 > pm$PM10)),
+  tibble(regla = "|NOX - (NO + NO2)| <= 1 ppb", evaluables = nrow(nox),
+         violaciones = sum(abs(nox$dif) > 1))
+) |> mutate(`% violaciones` = violaciones / evaluables * 100) |>
+  kable(digits = 2, format.args = list(big.mark = ","), caption = "Reglas de consistencia física")
+
+nox |> filter(abs(dif) > 1) |> count(estacion, name = "violaciones NOX") |>
+  arrange(desc(`violaciones NOX`)) |> kable(caption = "Violaciones NOX ≈ NO + NO2 por estación")
+```
+
+### Valores repetidos, límite de detección y saturación
+
+Tres rasgos típicos de datos de analizadores automáticos que pueden confundirse con datos válidos:
+
+1. **Rachas de valores idénticos** (sensor "congelado"). SIMA tiene una bandera para esto (`s`), pero conviene verificar si quedaron valores sin marcar. En `RAINF` y `SR` los ceros repetidos son normales (no llueve; es de noche), y en `NO`, `NO2` y `NOX` hay un piso de detección; por eso se excluyen de esta revisión.
+2. **Límite de detección:** cuando la concentración está por debajo de lo que el analizador puede medir se reporta un valor mínimo fijo. Si muchas observaciones valen exactamente el mínimo, la variable está *censurada por la izquierda*, lo que afecta la normalidad y las transformaciones logarítmicas posteriores.
+3. **Saturación:** el analizador topa en su máximo (500 ppb en NO/NOX).
+
+```{r}
+#| label: repetidos
+racha_larga <- function(x, k) {
+  g <- cumsum(c(TRUE, diff(x) != 0 | is.na(diff(x))))
+  n <- ave(seq_along(x), g, FUN = length)
+  !is.na(x) & n >= k
+}
+k_rep <- 12   # horas iguales consecutivas para considerar sospechoso
+vars_rep <- c("CO","O3","PM10","PM25","SO2","TOUT","RH","PRS","WSR","WDR")
+
+repetidos <- map_dfr(vars_rep, \(v) {
+  datos |> arrange(estacion, fecha) |> group_by(estacion) |>
+    summarise(variable = v, n = sum(racha_larga(.data[[v]], k_rep)), .groups = "drop")
+}) |> filter(n > 0)
+
+repetidos |> group_by(variable) |>
+  summarise(observaciones_en_rachas = sum(n), estaciones = n_distinct(estacion),
+            estacion_mayor = estacion[which.max(n)], .groups = "drop") |>
+  kable(caption = sprintf("Observaciones en rachas de >= %d horas idénticas", k_rep))
+
+# Límite de detección y saturación
+tibble(
+  variable = c("NO", "NOX", "NO2", "SO2", "CO", "PM25"),
+  minimo   = map_dbl(variable, \(v) min(datos[[v]], na.rm = TRUE)),
+  `% de observados = mínimo` = map_dbl(variable, \(v) mean(datos[[v]] == min(datos[[v]], na.rm = TRUE), na.rm = TRUE) * 100)
+) |> kable(digits = 2, caption = "Piso de detección: proporción de observaciones iguales al mínimo")
+
+cat("Observaciones de NO en el tope de 500 ppb:", sum(datos$NO == 500, na.rm = TRUE),
+    "| NOX:", sum(datos$NOX == 500, na.rm = TRUE), "\n")
+```
+
+# Imputación de datos faltantes
