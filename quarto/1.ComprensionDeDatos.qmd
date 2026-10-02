@@ -44,7 +44,7 @@ theme_set(theme_minimal(base_size = 11))
 set.seed(2026)                       # reproducibilidad (enmascaramiento sintético)
 
 # ---- Parámetros del análisis ------------------------------------------------
-ruta_datos          <- "../data/BD_2020_2025_concatenada.xlsx"  # cambiar por la base concatenada 2020-2025
+ruta_datos          <- "../data/BD_2020_2026_concatenada.xlsx"  # cambiar por la base concatenada 2020-2026
 formato             <- "excel_hojas"         # "excel_hojas" (1 hoja por estación) o "csv_largo"
 umbral_estructural  <- 95    # % de NA anual desde el cual una variable se considera "no medida"
 umbral_cobertura    <- 50    # % de NA anual desde el cual la cobertura se considera "baja"
@@ -86,7 +86,7 @@ crudo <- leer_bd(ruta_datos, formato) |>
     anio = year(fecha),
     .after = fecha
   ) |>
-  select(-date, -`...18`)
+  select(-date)
 
 vars <- c("CO","NO","NO2","NOX","O3","PM10","PM25","SO2",      # contaminantes
           "TOUT","RH","SR","RAINF","PRS","WSR","WDR")           # meteorología
@@ -160,9 +160,10 @@ Para poder tratar los huecos como series de tiempo regulares, se **completa la e
 ```{r}
 #| label: malla
 malla <- crudo |>
-  group_by(estacion) |>
-  summarise(fecha = list(seq(min(fecha), max(fecha), by = "hour")), .groups = "drop") |>
-  unnest(fecha)
+group_by(estacion) |>
+summarise(fecha = list(seq(min(fecha), max(fecha), by = "hour")), .groups = "drop") |>
+
+unnest(fecha)
 
 datos <- malla |>
   left_join(crudo |> distinct(estacion, fecha, .keep_all = TRUE), by = c("estacion", "fecha")) |>
@@ -415,7 +416,8 @@ rangos_op <- tribble(
   "2022","0,999","0,450","0,160","0,400","0,175","0,420","0,200","0,8","0,100","0,35","-5,45","0,1.25","700,740","0,360","0,25",
   "2023","0,900","0,800","0,175","0,500","0,175","0,500","0,250","0,14","0,100","0,40","0,45","0,1","690,740","0,360","0,70",
   "2024","0,999","0,999","0,180","0,400","0,130","0,500","0,150","0,18","0,100","0,38","-4,45.5","0,1.26","687.5,740","0,360","0,50",
-  "2025","0,820","0,350","0,185","0,350","0,175","0,400","0,405","0,10","0,100","0,40","-4.5,45","0,1.2","688,740","0,360","0,25"
+  "2025","0,820","0,350","0,185","0,350","0,175","0,400","0,405","0,10","0,100","0,40","-4.5,45","0,1.2","688,740","0,360","0,25",
+  "2026","0,820","0,350","0,185","0,350","0,175","0,400","0,405","0,10","0,100","0,40","-4.5,45","0,1.2","688,740","0,360","0,25"
 ) |>
   pivot_longer(-anio, names_to = "variable", values_to = "rango") |>
   separate(rango, c("min", "max"), sep = ",(?=[^,]*$)", convert = TRUE) |>
@@ -565,7 +567,7 @@ Antes de imputar, se decide qué método usa cada contaminante. PM2.5, PM10 y NO
 
 ## Preparar la base para imputar
 
-Este paso convierte a NA los valores fuera del rango de operación de SIMA (tabla fuera, ya calculada en la sección de calidad de datos). El resultado se llama datos_lim ("datos limpios"): es la base sobre la que trabaja toda la imputación, y no existía todavía porque no la habías corrido — por eso fallaba.
+Este paso convierte a NA los valores fuera del rango de operación de SIMA (tabla fuera, ya calculada en la sección de calidad de datos). 
 
 ```{r}
 #| label: preparar-datos-lim
@@ -1537,9 +1539,11 @@ Los tres incisos se resuelven en este orden: **(a) discretización → (c) atrib
 
 ```{r}
 #| label: trans-particion
-anio_prueba <- max(datos_sel$anio)
+anio_prueba <- 2025
 stopifnot("Se necesitan al menos dos años para separar entrenamiento y prueba" = n_distinct(datos_sel$anio) > 1)
-datos_sel <- datos_sel |> mutate(conjunto = if_else(anio < anio_prueba, "entrenamiento", "prueba"))
+datos_sel <- datos_sel |>
+  filter(anio <= anio_prueba) |>
+  mutate(conjunto = if_else(anio < anio_prueba, "entrenamiento", "prueba"))
 table(datos_sel$conjunto)
 ```
 
