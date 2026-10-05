@@ -1,0 +1,2 @@
+quarto/salidas/datos_modelo.csv filter=lfs diff=lfs merge=lfs -text
+quarto/salidas/datos_modelo.rds filter=lfs diff=lfs merge=lfs -text

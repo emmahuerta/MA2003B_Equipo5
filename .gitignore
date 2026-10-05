@@ -10,6 +10,4 @@ output/
 **/*.quarto_ipynb
 .DS_Store
 
-quarto/salidas/
-
 quarto/1.ComprensionDeDatos_files/
