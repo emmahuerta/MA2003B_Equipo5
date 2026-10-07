@@ -42,6 +42,7 @@ library(scales)
 library(knitr)
 
 theme_set(theme_minimal(base_size = 11))
+options(knitr.kable.NA = "")   # las celdas NA de las tablas se muestran vacías
 set.seed(2026)
 dir.create("salidas", showWarnings = FALSE)
 
@@ -50,8 +51,14 @@ ruta_base_e1   <- "salidas/datos_modelo.rds"  # base final de la Etapa 1
 min_horas_dia  <- 18    # horas válidas mínimas (75 % de 24) para aceptar un promedio diario
 min_dias_mes   <- 20    # días válidos mínimos para aceptar un promedio estación-mes
 min_dias_anio  <- 274   # días válidos mínimos (75 % de 365) para aceptar un promedio anual
+anios_comunes  <- 2021:2023  # años con todas las estaciones completas (ver 5.1)
+
 
 meses_es <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+```
+
+```{r}
+x <- readRDS("salidas/datos_modelo.rds"); nrow(x); table(x$estacion)
 ```
 
 ## Límites de referencia (NOM-025-SSA1 y OMS) {.unnumbered}
@@ -113,7 +120,7 @@ No se necesitan las 131 columnas de la Etapa 1 (escaladas, dummies, rezagos). Se
 | Objetivo | `PM25`, `PM10` | Son los contaminantes que definen "mejor para vivir" en el objetivo. |
 | Meteorología | `TOUT`, `RH`, `WSR`, `RAINF`, `SR` | Explican la dispersión y la estacionalidad (inversiones térmicas en meses fríos, lluvia como remoción) (INECC, 2015; Molina et al., 2019). |
 | Contexto de emisión | `NO2`, `CO` | Indicadores de combustión y tráfico; ayudan a interpretar de dónde viene el material particulado. |
-| Identificación | `estacion`, `zona`, `msnm`, `fecha`, `anio`, `mes`, `hora`, `temporada`, `periodo_dia`, `dia_semana`, `es_fin_semana`, `conjunto` | Permiten comparar estaciones, zonas, meses y periodos. |
+| Identificación | `estacion`, `zona`, `msnm`, `fecha`, `anio`, `mes`, `hora`, `temporada`, `periodo_dia`, `dia_semana`, `es_fin_semana`, `conjunto`, `calidad_aire`, `PM25_24h` | Permiten comparar estaciones, zonas, meses y periodos. |
 | Banderas | `imp_*`, `out_*` de las variables elegidas | Permiten auditar qué valores fueron imputados o marcados como extremos en la Etapa 1. |
 
 No se incluyen por ahora: `O3` y `SO2` (otros objetivos del reto, no del nuestro), `NO` (redundante con NO2 para este fin), `PRS` (en esta red refleja sobre todo la altitud, que ya está en `msnm`) y `WDR` (circular y con la nota de convención del archivo de etiquetas por resolver; se retomará si el análisis lo requiere). La selección está en vectores para ampliarla fácilmente.
@@ -125,7 +132,8 @@ vars_met  <- c("TOUT", "RH", "WSR", "RAINF", "SR")
 vars_ctx  <- c("NO2", "CO")
 vars_sel  <- c(vars_pm, vars_met, vars_ctx)
 vars_id   <- c("estacion", "zona", "msnm", "fecha", "anio", "mes", "hora", "temporada",
-               "periodo_dia", "dia_semana", "es_fin_semana", "conjunto")
+               "periodo_dia", "dia_semana", "es_fin_semana", "conjunto",
+               "calidad_aire", "PM25_24h")
 
 stopifnot(all(c(vars_id, vars_sel) %in% names(base_e1)))
 
@@ -138,9 +146,11 @@ datos_e2 <- base_e1 |>
          .after = mes)
 
 # Orden de las estaciones por PM2.5 medio (de la mejor a la peor), usado en todos los gráficos
-ord_est <- datos_e2 |> group_by(estacion) |>
+ord_est <- datos_e2 |> filter(anio %in% anios_comunes) |> group_by(estacion) |>
   summarise(m = mean(PM25, na.rm = TRUE), .groups = "drop") |>
   arrange(m) |> pull(estacion) |> as.character()
+# estaciones sin datos en el periodo común (p. ej. NO3) van al final, para no convertirlas en NA
+ord_est <- c(ord_est, setdiff(unique(as.character(datos_e2$estacion)), ord_est))
 datos_e2 <- datos_e2 |> mutate(estacion = factor(estacion, ord_est))
 
 tibble(Base = c("Etapa 1 (final)", "Etapa 2 (horaria)"),
@@ -194,7 +204,10 @@ datos_dia <- datos_e2 |>
     SR   = media_valida(SR),   RAINF = suma_valida(RAINF),
     NO2  = media_valida(NO2),  CO = media_valida(CO),
     .groups = "drop") |>
-  mutate(es_fin_semana = wday(dia, week_start = 1) >= 6)
+   mutate(es_fin_semana = wday(dia, week_start = 1) >= 6)
+
+# Base diaria del periodo común: se usa para comparar estaciones, zonas y meses
+datos_dia_c <- datos_dia |> filter(anio %in% anios_comunes)
 
 tibble(Elemento = c("Estación-días", "Estación-días con PM2.5 válido", "Estación-días con PM10 válido"),
        Valor = c(nrow(datos_dia), sum(!is.na(datos_dia$PM25)), sum(!is.na(datos_dia$PM10)))) |>
@@ -208,6 +221,7 @@ tibble(Elemento = c("Estación-días", "Estación-días con PM2.5 válido", "Est
 saveRDS(datos_e2,  "salidas/etapa2_datos_horarios.rds")
 saveRDS(datos_dia, "salidas/etapa2_datos_diarios.rds")
 saveRDS(catalogo,  "salidas/etapa2_catalogo_estaciones.rds")
+saveRDS(datos_dia_c, "salidas/etapa2_datos_diarios_comunes.rds")
 readr::write_csv(datos_dia, "salidas/etapa2_datos_diarios.csv")
 ```
 
@@ -277,11 +291,12 @@ Se buscan valores imposibles, inusuales o inconsistentes. En calidad del aire un
 revision <- tibble(
   Revisión = c("PM2.5 horario > PM10 horario (físicamente inconsistente)",
                "PM2.5 horario > 300 µg/m³", "PM10 horario > 500 µg/m³",
-               "Temperatura < 0 °C", "Humedad relativa = 100 %",
+              "Temperatura < 0 °C", "Humedad relativa = 100 %", "Humedad relativa < 5 % (implausible",
                "Horas con precipitación > 0", "Velocidad del viento > 60 km/h"),
   Horas = c(sum(datos_e2$PM25 > datos_e2$PM10, na.rm = TRUE),
             sum(datos_e2$PM25 > 300, na.rm = TRUE), sum(datos_e2$PM10 > 500, na.rm = TRUE),
             sum(datos_e2$TOUT < 0, na.rm = TRUE), sum(datos_e2$RH >= 100, na.rm = TRUE),
+            sum(datos_e2$RH < 5, na.rm = TRUE),
             sum(datos_e2$RAINF > 0, na.rm = TRUE), sum(datos_e2$WSR > 60, na.rm = TRUE))
 ) |> mutate(`% de las horas` = Horas / nrow(datos_e2) * 100)
 kable(revision, digits = 3, format.args = list(big.mark = ","), caption = "Valores a revisar (base horaria)")
@@ -291,13 +306,28 @@ kable(revision, digits = 3, format.args = list(big.mark = ","), caption = "Valor
 #| label: revision-episodios
 # ¿Cuándo y dónde están los PM2.5 horarios más altos?
 datos_e2 |> arrange(desc(PM25)) |>
-  select(estacion, fecha, PM25, PM10, imp_PM25) |> slice_head(n = 10) |>
+    select(estacion, fecha, PM25, PM10, imp_PM25, imp_PM10) |> slice_head(n = 10) |>
   kable(digits = 1, caption = "Diez valores horarios más altos de PM2.5")
 
 # ¿Se concentran en fechas específicas del año? (día-mes de las horas con PM2.5 > 100)
 datos_e2 |> filter(PM25 > 100) |>
   count(`día-mes` = format(fecha, "%m-%d"), sort = TRUE) |> slice_head(n = 10) |>
   kable(caption = "Días del año con más horas de PM2.5 > 100 µg/m³")
+```
+
+```{r}
+#| label: imputacion-estacion
+imp_pct <- function(x, a, solo_comun = FALSE) {
+  if (solo_comun) { x <- x[a %in% anios_comunes]; if (length(x) == 0) return(NA_real_) }
+  mean(x) * 100
+}
+datos_e2 |>
+  group_by(estacion) |>
+  summarise(`% PM2.5 imputado (todos los años)` = imp_pct(imp_PM25, anio),
+            `% PM2.5 imputado (2021-2023)`      = imp_pct(imp_PM25, anio, TRUE),
+            `% PM10 imputado (2021-2023)`       = imp_pct(imp_PM10, anio, TRUE),
+            .groups = "drop") |>
+  kable(digits = 1, caption = "Porcentaje de horas imputadas en la Etapa 1, por estación")
 ```
 
 # Herramientas de exploración descriptiva
@@ -308,6 +338,7 @@ Cada herramienta se eligió para responder una pregunta concreta del objetivo. N
 #| label: herramientas
 tribble(
   ~Sección, ~Pregunta, ~Herramienta, ~Variables,
+  "4.1", "¿Está balanceada la base y qué tan frecuentes son las categorías de calidad del aire?", "Frecuencias, porcentajes, diagramas de barras", "estacion, zona, temporada, calidad_aire",
   "5.1", "¿Qué tan comparables son las estaciones (cobertura)?", "Mapa de calor de cobertura estación-año", "PM25, estacion, anio",
   "5.2", "¿Cómo se distribuyen PM2.5 y PM10? ¿Hay extremos?", "Medidas de resumen, histograma (log), regla de Tukey", "PM25, PM10",
   "5.3", "¿Se mueven juntos PM2.5 y PM10? ¿Qué fracción es fina?", "Dispersión, correlación Pearson/Spearman, razón PM2.5/PM10", "PM25, PM10",
@@ -318,9 +349,127 @@ tribble(
   "5.8", "¿Con qué frecuencia se excede la norma y cuándo?", "% de días sobre límites NOM y OMS", "PM25, PM10, mes, estacion",
   "5.9", "¿Qué clima acompaña los meses altos?", "Ciclo anual del clima, correlación Spearman, dispersión con suavizado", "PM, TOUT, RH, WSR, RAINF, SR, NO2, CO",
   "5.10", "¿Influye la elevación?", "Dispersión estación vs. msnm", "PM, msnm",
-  "5.11", "¿Cómo se ve el ciclo diario?", "Perfil horario por temporada", "PM25, PM10, hora, temporada"
+  "5.11", "¿Cómo se ve el ciclo diario?", "Perfil horario por temporada", "PM25, PM10, hora, temporada",
+  "5.12", "¿Cuándo y dónde hay más horas de calidad mala? ¿Cambia entre semana y fin de semana?", "Tablas cruzadas, V de Cramér", "calidad_aire, temporada, zona, es_fin_semana"
 ) |> kable(caption = "Mapa pregunta → herramienta")
 ```
+
+## Variables categóricas: frecuencias y porcentajes
+
+Para las variables categóricas (`estacion`, `zona`, `temporada`, `periodo_dia`, tipo de día y la categoría de calidad del aire) se calculan frecuencias y porcentajes por categoría, $\%_k = 100\, n_k / N$, donde $N$ es el número de registros estación-hora. El objetivo es doble: ver si la base está balanceada entre estaciones y zonas (lo que condiciona las comparaciones posteriores) y describir qué tan frecuentes son las categorías de calidad del aire.
+
+```{r}
+#| label: cat-frecuencias
+ordenar <- function(x, orden) {
+  x <- as.character(x)
+  factor(x, levels = c(intersect(orden, unique(x)), setdiff(unique(x), orden)))
+}
+
+cat_base <- datos_e2 |>
+  mutate(
+    estacion     = factor(estacion, levels = levels(datos_e2$estacion)),
+    zona         = as.character(zona),
+    temporada    = ordenar(temporada, c("invierno", "primavera", "verano", "otoño")),
+    periodo_dia  = ordenar(periodo_dia, c("madrugada", "mañana", "tarde", "noche")),
+    fin_semana   = factor(if_else(as.logical(es_fin_semana), "Fin de semana", "Entre semana"),
+                          levels = c("Entre semana", "Fin de semana")),
+    calidad_aire = ordenar(str_to_sentence(as.character(calidad_aire)),
+                           c("Buena", "Aceptable", "Mala", "Muy mala", "Extremadamente mala"))
+  ) |>
+    select(estacion, zona, anio, temporada, periodo_dia, fin_semana, calidad_aire, any_of("PM25_24h"))
+
+frec <- function(d, var, nombre) {
+  d |>
+    count(categoria = .data[[var]], name = "n") |>
+    mutate(variable = nombre, categoria = as.character(categoria), pct = n / sum(n) * 100) |>
+    select(variable, categoria, n, pct)
+}
+
+est_zona <- cat_base |>
+  distinct(estacion, zona) |>
+  group_by(zona) |>
+  summarise(estaciones = paste(sort(as.character(estacion)), collapse = ", "), .groups = "drop") |>
+  mutate(variable = "Zona") |>
+  rename(categoria = zona)
+
+tab_cat <- bind_rows(
+  frec(cat_base, "zona",         "Zona"),
+  frec(cat_base, "estacion",     "Estación"),
+  frec(cat_base, "temporada",    "Temporada"),
+  frec(cat_base, "periodo_dia",  "Periodo del día"),
+  frec(cat_base, "fin_semana",   "Tipo de día"),
+  frec(cat_base, "calidad_aire", "Calidad del aire (categoría)")
+) |>
+  left_join(est_zona, by = c("variable", "categoria"))
+
+kable(tab_cat, digits = 2, format.args = list(big.mark = ","),
+      col.names = c("Variable", "Categoría", "Registros (horas)", "%", "Estaciones"),
+      caption = "Frecuencias de las variables categóricas (unidad: estación-hora)")
+
+tab_cat |>
+  filter(variable %in% c("Estación", "Zona")) |>
+  group_by(variable) |>
+  summarise(K = n(), `% si fuera balanceada` = 100 / n(),
+            `% mínimo` = min(pct), `% máximo` = max(pct)) |>
+  kable(digits = 1, caption = "Desbalance de cobertura entre categorías")
+```
+
+El porcentaje por zona depende sobre todo de cuántas estaciones tiene cada zona (ver la columna "Estaciones" de la tabla anterior), así que mide cobertura de la red y no calidad del aire. Por eso las comparaciones entre zonas se hacen con promedios y proporciones, nunca con conteos de horas.
+
+La categoría de calidad del aire (`calidad_aire`) se asigna con el promedio móvil de 24 h de PM2.5 y los cortes del índice de la NOM-172-SEMARNAT-2019 (SEMARNAT, 2019): Buena ≤ 25, Aceptable ≤ 45, Mala ≤ 79, Muy mala ≤ 147 y Extremadamente mala > 147 µg/m³. Estos cortes siguen pendientes de verificar contra la versión vigente de la norma. Se comprueba que esa regla reproduzca la variable de la base.
+
+```{r}
+#| label: cat-verificacion
+if ("PM25_24h" %in% names(cat_base)) {
+  recon <- cut(cat_base$PM25_24h, breaks = c(-Inf, 25, 45, 79, 147, Inf),
+               labels = c("Buena", "Aceptable", "Mala", "Muy mala", "Extremadamente mala"))
+  print(table(Real = cat_base$calidad_aire, Reconstruida = recon))
+  cat("Coincidencia con la regla NOM-172 sobre PM2.5 24 h:",
+      percent(mean(as.character(recon) == as.character(cat_base$calidad_aire), na.rm = TRUE),
+              accuracy = 0.01), "\n")
+}
+```
+
+```{r}
+#| label: cat-graficas
+#| fig-height: 3.5
+tab_est <- tab_cat |>
+  filter(variable == "Estación") |>
+  left_join(distinct(cat_base, estacion, zona) |> mutate(categoria = as.character(estacion)) |>
+              select(categoria, zona), by = "categoria") |>
+  mutate(categoria = factor(categoria, levels = levels(cat_base$estacion)))
+
+g_cat_est <- ggplot(tab_est, aes(categoria, pct, fill = zona)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.1f", pct)), vjust = -0.3, size = 3) +
+  geom_hline(yintercept = 100 / n_distinct(cat_base$estacion), linetype = 2) +
+  scale_y_continuous(expand = expansion(mult = c(0, .12))) +
+  labs(x = "Estación", y = "% de los registros horarios", fill = "Zona",
+       title = "Participación de cada estación en la base",
+       subtitle = "Línea punteada: participación si todas las estaciones tuvieran la misma cobertura")
+
+col_aire <- c("Buena" = "#00E400", "Aceptable" = "#FFFF00", "Mala" = "#FF7E00",
+              "Muy mala" = "#FF0000", "Extremadamente mala" = "#8F3F97")
+
+tab_aire <- tab_cat |>
+  filter(variable == "Calidad del aire (categoría)") |>
+  mutate(categoria = factor(categoria, levels = names(col_aire)))
+
+g_cat_aire <- ggplot(tab_aire, aes(categoria, pct, fill = categoria)) +
+  geom_col(color = "grey30") +
+  geom_text(aes(label = sprintf("%.2f %%", pct)), vjust = -0.3, size = 3.2) +
+  scale_fill_manual(values = col_aire, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, .12))) +
+  labs(x = NULL, y = "% de los registros horarios",
+       title = "Categoría de calidad del aire (PM2.5, promedio móvil de 24 h)")
+
+g_cat_est
+g_cat_aire
+
+ggsave("salidas/cat_estaciones.png",   g_cat_est,  width = 6.5, height = 3.2, dpi = 300)
+ggsave("salidas/cat_calidad_aire.png", g_cat_aire, width = 6.5, height = 3.0, dpi = 300)
+```
+
 
 # Exploración descriptiva orientada al objetivo
 
@@ -354,14 +503,15 @@ ggplot(cobertura, aes(factor(anio), estacion, fill = pct_dias_PM25)) +
 ```{r}
 #| label: cobertura-tabla
 cobertura |> group_by(estacion) |>
-  summarise(`años presentes` = sum(!is.na(dias_PM25)),
+    summarise(`años con datos` = sum(!is.na(dias_PM25)),
+            `años completos (≥ 90 % de días)` = sum(pct_dias_PM25 >= 90, na.rm = TRUE),
             `% días PM2.5 válidos (años presentes)` = mean(pct_dias_PM25, na.rm = TRUE),
             `% días PM10 válidos (años presentes)`  = mean(pct_dias_PM10, na.rm = TRUE),
             `% malla horaria presente` = mean(pct_horas, na.rm = TRUE)) |>
   kable(digits = 1, caption = "Cobertura promedio por estación")
 ```
 
-**Qué mirar.** Estaciones con años ausentes (la Etapa 1 excluyó NE2 y NO en 2025 y NO3 en 2022 y 2023 por falta de PM2.5) y años con baja cobertura. Esto define si la comparación entre estaciones debe hacerse sobre un periodo común o ponderando por año.
+**Qué mirar.** Estaciones-año ausentes (gris) o con cobertura parcial (rojo). Solo 2021-2023 tienen cobertura completa en todas las estaciones con datos en esos años; 2020 cubre la mitad de la red y 2024-2025 pierden estaciones o tienen años parciales. Por eso las comparaciones entre estaciones, zonas y meses de las secciones 5.4 a 5.12 se hacen sobre el **periodo común 2021-2023**, mientras que distribución, relación PM2.5-PM10 y estabilidad anual usan todos los años.
 
 ## Distribución de PM2.5 y PM10
 
@@ -458,10 +608,10 @@ kable(rel_est, digits = 2, caption = "Relación PM2.5-PM10 por estación (diaria
 
 ```{r}
 #| label: box-estaciones
-lim_y <- function(v) quantile(datos_dia[[v]], .995, na.rm = TRUE)
+lim_y <- function(v) quantile(datos_dia_c[[v]], .995, na.rm = TRUE)
 
 p_est <- function(v, titulo, oms) {
-  ggplot(datos_dia, aes(estacion, .data[[v]], fill = zona)) +
+  ggplot(datos_dia_c, aes(estacion, .data[[v]], fill = zona)) +
     geom_boxplot(outlier.size = .3, outlier.alpha = .3) +
     geom_hline(yintercept = oms, linetype = 2, color = "darkgreen") +
     coord_cartesian(ylim = c(0, lim_y(v))) +
@@ -473,7 +623,7 @@ p_est("PM10", "PM10 diario por estación (línea: guía OMS 24 h = 45)", 45)
 
 ```{r}
 #| label: tabla-estaciones
-res_est <- datos_dia |>
+res_est <- datos_dia_c |>
   group_by(estacion, zona, msnm) |>
   summarise(`días PM2.5` = sum(!is.na(PM25)),
             `PM2.5 media` = mean(PM25, na.rm = TRUE), `PM2.5 mediana` = median(PM25, na.rm = TRUE),
@@ -482,7 +632,7 @@ res_est <- datos_dia |>
             `PM10 IQR` = IQR(PM10, na.rm = TRUE), `PM10 p95` = quantile(PM10, .95, na.rm = TRUE),
             .groups = "drop") |>
   arrange(`PM2.5 media`)
-kable(res_est, digits = 1, caption = "Resumen de PM2.5 y PM10 diarios por estación (µg/m³)")
+kable(res_est, digits = 1, caption = "Resumen de PM2.5 y PM10 diarios por estación, 2021-2023 (µg/m³)")
 ```
 
 ```{r}
@@ -496,7 +646,7 @@ res_est |> left_join(catalogo, by = "estacion") |>
   facet_wrap(~contaminante) +
   coord_quickmap() +
   labs(x = "Longitud", y = "Latitud", size = "µg/m³", color = "µg/m³",
-       title = "Promedio diario 2020-2025 por estación (sin mapa base)")
+       title = "Promedio diario 2021-2023 por estación (sin mapa base)")
 ```
 
 ```{r}
@@ -524,7 +674,7 @@ kable(res_zona, digits = 1, caption = "Resumen por zona (promedio de los promedi
 r2 <- function(formula, data) summary(lm(formula, data = data))$r.squared
 
 r2_tab <- function(y, nombre) {
-  d <- datos_dia |> filter(!is.na(.data[[y]]), .data[[y]] > 0) |>
+  d <- datos_dia_c |> filter(!is.na(.data[[y]]), .data[[y]] > 0) |>
     mutate(ly = log(.data[[y]]), mes_f = factor(mes), anio_f = factor(anio))
   tibble(contaminante = nombre,
          factor = c("estación", "zona", "mes", "año", "estación + mes", "estación + mes + año"),
@@ -542,7 +692,7 @@ bind_rows(r2_tab("PM25", "PM2.5"), r2_tab("PM10", "PM10")) |>
 
 ```{r}
 #| label: estacion-mes
-sm <- datos_dia |>
+sm <- datos_dia_c |>
   group_by(estacion, zona, mes_lab) |>
   summarise(dias25 = sum(!is.na(PM25)), dias10 = sum(!is.na(PM10)),
             PM25 = if_else(dias25 >= min_dias_mes, mean(PM25, na.rm = TRUE), NA_real_),
@@ -557,12 +707,12 @@ sm |> pivot_longer(c(PM25, PM10), names_to = "contaminante", values_to = "media"
   scale_fill_gradient(low = "#fff7ec", high = "#e34a33", na.value = "grey85") +
   facet_wrap(~contaminante, ncol = 1) +
   labs(x = NULL, y = NULL, fill = "µg/m³",
-       title = "Promedio diario por estación y mes (2020-2025)")
+       title = "Promedio diario por estación y mes (2021-2023)")
 ```
 
 ```{r}
 #| label: mes-global
-datos_dia |> filter(!is.na(PM25)) |>
+datos_dia_c |> filter(!is.na(PM25)) |>
   ggplot(aes(mes_lab, PM25)) +
   geom_boxplot(outlier.size = .3, outlier.alpha = .3, fill = "grey85") +
   geom_hline(yintercept = 15, linetype = 2, color = "darkgreen") +
@@ -596,6 +746,19 @@ rownames(cor_perfil) <- colnames(cor_perfil) <- as.character(perfil_w$estacion)
 cat("Correlación entre perfiles mensuales de PM2.5 de distintas estaciones (pares): mínimo =",
     round(min(cor_perfil[upper.tri(cor_perfil)], na.rm = TRUE), 2), "| mediana =",
     round(median(cor_perfil[upper.tri(cor_perfil)], na.rm = TRUE), 2), "\n")
+```
+
+```{r}
+#| label: sensibilidad-pirotecnia
+# ¿Sigue siendo diciembre el peor mes si se excluyen los días de pirotecnia (24-dic a 1-ene)?
+dias_pirot <- function(d) (month(d) == 12 & day(d) >= 24) | (month(d) == 1 & day(d) == 1)
+datos_dia_c |>
+  mutate(pirotecnia = dias_pirot(dia)) |>
+  group_by(mes_lab) |>
+  summarise(`PM2.5 con todos los días`  = mean(PM25, na.rm = TRUE),
+            `PM2.5 sin 24-dic a 1-ene`  = mean(PM25[!pirotecnia], na.rm = TRUE),
+            `días excluidos`            = sum(pirotecnia), .groups = "drop") |>
+  kable(digits = 1, caption = "Sensibilidad del perfil mensual a los días de pirotecnia (2021-2023)")
 ```
 
 ## Estabilidad entre años y cumplimiento anual
@@ -641,7 +804,7 @@ anual |> group_by(anio) |>
 
 ```{r}
 #| label: excedencias
-exc <- datos_dia |>
+exc <- datos_dia_c |>
   left_join(lim_norma |> select(anio, PM25_24h, PM10_24h), by = "anio") |>
   mutate(e25_nom = PM25 > PM25_24h, e25_oms = PM25 > lim_oms[["PM25_24h"]],
          e10_nom = PM10 > PM10_24h, e10_oms = PM10 > lim_oms[["PM10_24h"]])
@@ -655,7 +818,7 @@ exc |> group_by(estacion) |>
             `PM10 > NOM (%)` = mean(e10_nom, na.rm = TRUE) * 100,
             `PM10 > OMS (%)` = mean(e10_oms, na.rm = TRUE) * 100,
             `PM10 p99` = quantile(PM10, .99, na.rm = TRUE)) |>
-  kable(digits = 1, caption = "Frecuencia de excedencias de 24 h por estación (2020-2025)")
+  kable(digits = 1, caption = "Frecuencia de excedencias de 24 h por estación (2021-2023)")
 ```
 
 ```{r}
@@ -688,7 +851,7 @@ exc |> group_by(mes_lab) |>
 
 ```{r}
 #| label: clima-mes
-datos_dia |>
+datos_dia_c |>
   group_by(mes_lab) |>
   summarise(`TOUT (°C)` = mean(TOUT, na.rm = TRUE), `RH (%)` = mean(RH, na.rm = TRUE),
             `WSR (km/h)` = mean(WSR, na.rm = TRUE), `SR (kW/m²)` = mean(SR, na.rm = TRUE),
@@ -706,7 +869,7 @@ datos_dia |>
 vars_cor <- c("TOUT", "RH", "WSR", "RAINF", "SR", "NO2", "CO")
 
 cor_tab <- map_dfr(c("PM25", "PM10"), \(p) map_dfr(c("Todo el año", levels(datos_dia$temporada)), \(s) {
-  d <- if (s == "Todo el año") datos_dia else filter(datos_dia, temporada == s)
+  d <- if (s == "Todo el año") datos_dia_c else filter(datos_dia_c, temporada == s)
   tibble(contaminante = recode(p, PM25 = "PM2.5"), temporada = s, variable = vars_cor,
          rho = map_dbl(vars_cor, \(v) cor(d[[p]], d[[v]], method = "spearman", use = "pairwise.complete.obs")))
 }))
@@ -725,11 +888,11 @@ cor_tab |>
 
 ```{r}
 #| label: dispersion-clima
-datos_dia |>
+datos_dia_c |>
   filter(!is.na(PM25), PM25 > 0) |>
   select(PM25, TOUT, WSR, RH) |>
   drop_na() |>
-  slice_sample(n = min(15000, nrow(datos_dia))) |>
+  slice_sample(n = min(15000, nrow(datos_dia_c))) |>
   pivot_longer(c(TOUT, WSR, RH), names_to = "variable", values_to = "x") |>
   ggplot(aes(x, PM25)) +
   geom_point(alpha = .08, size = .4) +
@@ -766,6 +929,7 @@ tibble(contaminante = c("PM2.5", "PM10"),
 ```{r}
 #| label: ciclo-diario
 datos_e2 |>
+  filter(anio %in% anios_comunes) |>
   group_by(hora, temporada) |>
   summarise(PM2.5 = mean(PM25, na.rm = TRUE), PM10 = mean(PM10, na.rm = TRUE), .groups = "drop") |>
   pivot_longer(c(PM2.5, PM10), names_to = "contaminante", values_to = "media") |>
@@ -775,6 +939,102 @@ datos_e2 |>
   facet_wrap(~contaminante, scales = "free_y") +
   labs(x = "Hora del día", y = "µg/m³", color = "Temporada",
        title = "Perfil horario promedio por temporada (todas las estaciones)")
+```
+
+## Tablas cruzadas
+
+**Pregunta.** ¿Cuándo y en qué zonas se concentran las horas de calidad del aire mala, y cambia el patrón entre semana y en fin de semana? Se cruzan cuatro pares de variables: cobertura por estación y temporada (¿es comparable el perfil estacional?), calidad del aire por temporada, "Mala o peor" por zona y temporada, y mediana de PM entre semana vs. fin de semana por zona (¿pesa el tráfico y la actividad laboral?).
+
+**Definición de "mala calidad".** `calidad_aire` sigue el índice de la NOM-172-SEMARNAT-2019 (SEMARNAT, 2019) y describe la calidad del aire que comunica el índice al público: "Mala o peor" empieza en 45 µg/m³ de promedio móvil de 24 h. Las excedencias de la sección 5.8, en cambio, usan el límite diario de la NOM-025-SSA1 vigente cada año (33 a 45 µg/m³) sobre el promedio diario calendario (Secretaría de Salud, 2021). Son criterios distintos y no se deben mezclar en las conclusiones.
+
+```{r}
+#| label: cx-setup
+temporadas   <- c("invierno", "primavera", "verano", "otoño")
+niveles_aire <- c("Buena", "Aceptable", "Mala", "Muy mala", "Extremadamente mala")
+malas        <- c("Mala", "Muy mala", "Extremadamente mala")
+
+cramer_v <- function(tab) {
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE)$statistic)
+  sqrt(as.numeric(chi) / (sum(tab) * (min(dim(tab)) - 1)))
+}
+
+cat_c <- cat_base |> filter(anio %in% anios_comunes)   # base horaria del periodo común
+```
+
+Cobertura por estación y temporada: (días con PM2.5 válido; perfil de fila en %).
+
+```{r}
+#| label: cx-cobertura
+cx_cob <- datos_dia |>
+  filter(!is.na(PM25)) |>
+  count(estacion, temporada) |>
+  group_by(estacion) |>
+  mutate(pct = n / sum(n) * 100, total = sum(n)) |>
+  ungroup() |>
+  select(-n) |>
+  pivot_wider(names_from = temporada, values_from = pct, values_fill = 0) |>
+  select(estacion, `días PM2.5` = total, all_of(temporadas)) |>
+  arrange(estacion)
+
+kable(cx_cob, digits = c(0, 0, 1, 1, 1, 1), format.args = list(big.mark = ","),
+      caption = "Cobertura de PM2.5 por estación y temporada (% de los días válidos de cada estación)")
+```
+
+Calidad del aire por temporada (% de horas dentro de cada temporada).
+
+```{r}
+#| label: cx-aire-temporada
+tab_b <- table(Temporada = cat_c$temporada, Categoria = cat_c$calidad_aire)
+
+cx_aire_temp <- as.data.frame(prop.table(tab_b, 1) * 100) |>
+  pivot_wider(names_from = Categoria, values_from = Freq) |>
+  select(Temporada, any_of(niveles_aire)) |>
+  mutate(`Mala o peor` = rowSums(across(any_of(malas))))
+
+kable(cx_aire_temp, digits = 2,
+      caption = paste0("Categoría de calidad del aire por temporada, 2021-2023 (% de horas). V de   Cramér = ",
+                       round(cramer_v(tab_b), 3)))
+```
+
+La V de Cramér se reporta solo como tamaño de efecto. No se hacen pruebas de hipótesis porque las horas consecutivas están autocorrelacionadas (el promedio móvil de 24 h comparte 23 de 24 horas entre horas vecinas) y con más de 550 mil registros cualquier diferencia saldría "significativa".
+
+
+Horas con calidad Mala o peor, por zona y temporada (% de horas de cada celda).
+
+```{r}
+#| label: cx-zona-temporada
+cx_zona_temp <- cat_c |>
+  mutate(mala_o_peor = calidad_aire %in% malas) |>
+  group_by(zona, temporada) |>
+  summarise(pct = mean(mala_o_peor) * 100, .groups = "drop") |>
+  pivot_wider(names_from = temporada, values_from = pct) |>
+  select(zona, all_of(temporadas)) |>
+  left_join(distinct(cat_c, estacion, zona) |> count(zona, name = "estaciones"), by = "zona") |>
+  relocate(estaciones, .after = zona)
+
+kable(cx_zona_temp, digits = 2,
+      caption = "% de horas con calidad del aire Mala o peor, por zona y temporada, 2021-2023")
+```
+
+Entre semana vs. fin de semana: (mediana del promedio diario, µg/m³).
+
+```{r}
+#| label: cx-tipo-dia
+cx_tipo_dia <- function(v, nombre) {
+  datos_dia_c |>
+    filter(!is.na(.data[[v]])) |>
+    mutate(tipo = if_else(es_fin_semana, "fin", "sem")) |>
+    group_by(zona, tipo) |>
+    summarise(mediana = median(.data[[v]]), .groups = "drop") |>
+    pivot_wider(names_from = tipo, values_from = mediana) |>
+    transmute(Contaminante = nombre, Zona = zona,
+              `Entre semana` = sem, `Fin de semana` = fin,
+              `Cambio (%)` = (fin - sem) / sem * 100)
+}
+
+cx_finsem <- bind_rows(cx_tipo_dia("PM25", "PM2.5"), cx_tipo_dia("PM10", "PM10"))
+kable(cx_finsem, digits = 1,
+      caption = "Mediana del promedio diario entre semana y en fin de semana, por zona, 2021-2023")
 ```
 
 ## Matriz estación × mes (insumo para análisis posteriores)
@@ -802,7 +1062,7 @@ tibble(Elemento = c("Estaciones (filas)", "Variables (PM2.5 y PM10 × 12 meses)"
 #| label: hallazgos
 est_mejor <- res_est$estacion[which.min(res_est$`PM2.5 media`)]
 est_peor  <- res_est$estacion[which.max(res_est$`PM2.5 media`)]
-mes_tab   <- datos_dia |> group_by(mes_lab) |> summarise(m = mean(PM25, na.rm = TRUE))
+mes_tab   <- datos_dia_c |> group_by(mes_lab) |> summarise(m = mean(PM25, na.rm = TRUE))
 r2_est    <- r2_tab("PM25", "PM2.5")
 
 tibble(
@@ -824,7 +1084,7 @@ tibble(
 
 ## Síntesis interpretativa
 
-**[COMPLETAR después de correr el documento y revisar las secciones 5.1 a 5.12. Guía de lo que debe contestar]:**
+**[COMPLETAR después de correr el documento y revisar las secciones 5.1 a 5.13. Guía de lo que debe contestar]:**
 
 - ¿Son comparables las estaciones (cobertura, años comunes)? ¿Hay que restringir a un periodo común?
 - ¿PM2.5 y PM10 se mueven juntas? ¿Se pueden resumir en un índice o conviene tratarlas por separado?
@@ -841,6 +1101,8 @@ Instituto Nacional de Ecología y Cambio Climático (INECC). (2015). *Evaluació
 Johnson, R. A., & Wichern, D. W. (2007). *Applied multivariate statistical analysis* (6.ª ed.). Pearson Prentice Hall.
 
 Molina, M., Mena, C., Mediavilla Sahagún, A., Gómes Sánchez, M. D., Barrera Huertas, H. A., García Escalante, J., Hernández Valdez, N., Sánchez Martínez, S., Castillo, J. J., & Klakamp, J. (2019). *Análisis de la contaminación por PM2.5 en la ciudad de Monterrey, Nuevo León: identificación de medidas estratégicas de control* (Environmental report). Centro Mario Molina para Estudios Estratégicos sobre Energía y Medio Ambiente A.C.
+
+Secretaría de Medio Ambiente y Recursos Naturales (SEMARNAT). (2019). *NOM-172-SEMARNAT-2019: Lineamientos para la obtención y comunicación del Índice de Calidad del Aire y Riesgos a la Salud* (Norma Oficial Mexicana). Diario Oficial de la Federación.
 
 Secretaría de Salud. (2021, 27 de octubre). *NOM-025-SSA1-2021, Salud ambiental. Criterio para evaluar la calidad del aire ambiente, con respecto a las partículas suspendidas PM10 y PM2.5* (Norma Oficial Mexicana). Diario Oficial de la Federación.
 
