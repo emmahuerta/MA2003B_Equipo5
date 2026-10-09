@@ -57,10 +57,6 @@ anios_comunes  <- 2021:2023  # años con todas las estaciones completas (ver 5.1
 meses_es <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
 ```
 
-```{r}
-x <- readRDS("salidas/datos_modelo.rds"); nrow(x); table(x$estacion)
-```
-
 ## Límites de referencia (NOM-025-SSA1 y OMS) {.unnumbered}
 
 Los límites de la NOM-025-SSA1-2021 no son un valor único: la norma establece un **cumplimiento gradual** (Secretaría de Salud, 2021). Para los años del análisis (2020-2025) se usan estos valores por año:
@@ -88,11 +84,17 @@ kable(lim_norma, caption = "Límites de la NOM-025-SSA1 aplicables por año (µg
 
 # Continuidad del proyecto
 
-**Objetivo de indagación (retomado de la Etapa 1).** Determinar en qué zonas del Área Metropolitana de Monterrey (AMM) es mejor vivir y en qué meses del año, a partir de la presencia de material particulado (PM2.5 y PM10) medido por el SIMA.
+**Objetivo de indagación.** Identificar en qué estaciones de monitoreo del SIMA (y, con ello, en qué zonas del Área Metropolitana de Monterrey, AMM) y en qué meses del año la exposición a PM2.5 y PM10 es menor y mayor. Para ello se estimará, por estación y mes, el nivel típico del promedio diario (mediana y media) y la proporción de días que rebasan los límites de referencia, y se contrastará si las diferencias entre estaciones y entre meses son estadísticamente significativas considerando la dependencia temporal de los datos, con el fin de orientar dónde y cuándo la calidad del aire es más favorable para vivir.
 
-- Este objetivo es una reformulación práctica de la pregunta guía de la Etapa 1 (agrupar estaciones según su perfil estacional de PM2.5 y PM10 e identificar las zonas con exposición más alta y más baja a lo largo del año): "mejor para vivir" se operacionaliza como **menor nivel y menor frecuencia de excedencias de PM2.5 y PM10**, y "en qué meses" como el **perfil estacional**.
-- Todavía **no está acotado**: esta etapa sirve para ver qué responden los datos (cuántas estaciones hay, qué tan comparables son, si domina el efecto de la estación, del mes o del año) y decidir el alcance final al cerrarla.
-- Retroalimentación de la Etapa 1: **[PENDIENTE: pegar aquí la retroalimentación recibida y ajustar el objetivo si aplica]**.
+**Objetivos específicos.**
+
+1. Caracterizar el nivel y la variabilidad de PM2.5 y PM10 en cada estación y agrupar las estaciones con perfiles anuales de exposición similares.
+2. Determinar en qué meses se concentran los niveles más altos y más bajos, si ese patrón es común a todas las estaciones y si las diferencias entre estaciones y meses son significativas.
+3. Cuantificar, con intervalos de confianza, con qué frecuencia y en qué épocas cada estación rebasa los límites de referencia.
+4. Identificar las condiciones meteorológicas y de otros contaminantes asociadas a los días de mayor concentración y a los días críticos.
+
+- Respecto a la Etapa 1, el objetivo separa **qué se quiere saber** de **cómo se hará** (agrupar, contrastar), y cambia la unidad de comparación de zona a estación y el periodo de comparación a 2021-2023 (secciones 5.1 y 5.4).
+- **Retroalimentación de la Etapa 1 y cómo se atiende aquí:** (i) documentación sistemática de las variables (tipo, unidad, rango, faltantes e imputados; sección 3.1); (ii) trazabilidad del número de filas de la base final, con la conciliación de la sección 2.1; (iii) decisión sobre valores extremos por variable (ver notas de la sección 3.1: se winsorizaron todas las variables salvo `PM25`, que solo se marcó); (iv) corrección de los límites normativos (25 y 50 µg/m³ son de 2026).
 
 # Dimensión del conjunto de datos y base de la Etapa 2
 
@@ -110,6 +112,27 @@ tibble(
             format(min(base_e1$fecha), "%Y-%m-%d"), format(max(base_e1$fecha), "%Y-%m-%d"))
 ) |> kable(caption = "Dimensión de la base final de la Etapa 1")
 ```
+
+### Conciliación con la Etapa 1
+
+La Etapa 1 reportó una base de modelado sin NO3 (historial corto, solo 2024-2025). El archivo `datos_modelo.rds` sí la incluye. Se desglosa el total para que cualquiera pueda reproducir de dónde salen las filas, cuántas son de entrenamiento y de prueba, y por qué la base inicia el 2 de enero de 2020.
+
+```{r}
+#| label: conciliacion-e1
+tibble(Elemento = c("Base final Etapa 1 (con NO3)", "Horas de NO3", "Base sin NO3"),
+       Valor = c(nrow(base_e1), sum(base_e1$estacion == "NO3"), sum(base_e1$estacion != "NO3"))) |>
+  kable(format.args = list(big.mark = ","), caption = "Conciliación con la base reportada en la Etapa 1")
+
+base_e1 |> count(NO3 = estacion == "NO3", conjunto) |>
+  kable(format.args = list(big.mark = ","), caption = "Registros por conjunto, con y sin NO3")
+
+# ¿Por qué inicia el 2 de enero de 2020?
+base_e1 |> group_by(estacion) |>
+  summarise(inicio = min(fecha), fin = max(fecha), .groups = "drop") |>
+  arrange(inicio) |> kable(caption = "Primer y último registro por estación")
+```
+
+Para explicar el 2 de enero, revisen en el código de la Etapa 1 qué paso elimina el 1 de enero (lo más probable es el promedio móvil de 24 h o los rezagos) y anótenlo aquí.
 
 ## Selección de variables para el análisis
 
@@ -282,6 +305,40 @@ dic_cat <- tribble(
 kable(dic_cat, caption = "Variables categóricas y de tiempo")
 ```
 
+**Definición de temporada.** La temporada sigue las estaciones meteorológicas; la tabla se genera de los datos para verificar qué meses forman cada una.
+
+```{r}
+#| label: temporada-def
+datos_e2 |> distinct(mes, temporada) |> arrange(mes) |>
+  group_by(temporada) |> summarise(meses = paste(meses_es[mes], collapse = ", "), .groups = "drop") |>
+  kable(caption = "Definición de temporada")
+```
+
+## Estadísticas descriptivas de las variables del análisis
+
+La tabla de arriba solo da el rango horario. Como las variables meteorológicas, `NO2` y `CO` entrarán en la regresión, se calculan también la media, la desviación estándar y los cuartiles de sus **promedios diarios** en el periodo común 2021-2023 (la precipitación es la suma diaria, en mm/día). La columna `latex` sale lista para copiar en la Tabla 2 del reporte.
+
+```{r}
+#| label: estadisticas-diarias
+vars_tab2 <- c("PM25", "PM10", "TOUT", "RH", "WSR", "RAINF", "SR", "NO2", "CO")
+
+est_diaria <- datos_dia_c |>
+  summarise(across(all_of(vars_tab2),
+                   list(media = \(x) mean(x, na.rm = TRUE), de = \(x) sd(x, na.rm = TRUE),
+                        q1  = \(x) quantile(x, .25, na.rm = TRUE, names = FALSE),
+                        med = \(x) median(x, na.rm = TRUE),
+                        q3  = \(x) quantile(x, .75, na.rm = TRUE, names = FALSE)),
+                   .names = "{.col}__{.fn}")) |>
+  pivot_longer(everything(), names_to = c("variable", ".value"), names_sep = "__") |>
+  mutate(f = if_else(variable %in% c("SR", "CO"), "%.2f", "%.1f"),
+         latex = sprintf(paste0(f, " (", f, ") & ", f, " (", f, "--", f, ")"),
+                         media, de, med, q1, q3)) |>
+  select(-f)
+
+kable(est_diaria, digits = 2,
+      caption = "Estadísticas de los promedios diarios, 2021-2023 (RAINF: suma diaria, mm/día)")
+```
+
 ## Valores que requieren revisión
 
 Se buscan valores imposibles, inusuales o inconsistentes. En calidad del aire un valor muy alto puede ser un episodio real (por ejemplo, pirotecnia de fin de año) y no un error, por eso se **revisan y se reportan, no se eliminan** en esta etapa.
@@ -291,7 +348,7 @@ Se buscan valores imposibles, inusuales o inconsistentes. En calidad del aire un
 revision <- tibble(
   Revisión = c("PM2.5 horario > PM10 horario (físicamente inconsistente)",
                "PM2.5 horario > 300 µg/m³", "PM10 horario > 500 µg/m³",
-              "Temperatura < 0 °C", "Humedad relativa = 100 %", "Humedad relativa < 5 % (implausible",
+              "Temperatura < 0 °C", "Humedad relativa = 100 %", "Humedad relativa < 5 % (implausible)",
                "Horas con precipitación > 0", "Velocidad del viento > 60 km/h"),
   Horas = c(sum(datos_e2$PM25 > datos_e2$PM10, na.rm = TRUE),
             sum(datos_e2$PM25 > 300, na.rm = TRUE), sum(datos_e2$PM10 > 500, na.rm = TRUE),
@@ -1054,6 +1111,109 @@ tibble(Elemento = c("Estaciones (filas)", "Variables (PM2.5 y PM10 × 12 meses)"
   kable(caption = "Dimensión de la matriz de perfiles estacionales")
 ```
 
+## Dependencia temporal: ¿son independientes los días y los años de una estación?
+
+**Pregunta.** Las pruebas y modelos clásicos suponen observaciones independientes. Aquí se mide si los días consecutivos de una estación se parecen entre sí y si los años de una misma estación se parecen más entre sí que a los de otras. El resultado justifica modelar la dependencia (errores AR(1) y bootstrap por bloques; Pinheiro y Bates, 2000; Künsch, 1989) en lugar de tratar días o años como independientes.
+
+**Paso 1. Quitar el ciclo mensual.** A cada estación se le resta la media de log(PM) de su mes; lo que queda es la variación día a día. Se completa el calendario para que los días faltantes queden como `NA` y los rezagos correspondan a días reales.
+
+```{r}
+#| label: acf-serie
+serie <- datos_dia_c |>
+  mutate(estacion = droplevels(estacion)) |>
+  select(estacion, dia, PM25, PM10) |>
+  complete(estacion, dia = seq(min(datos_dia_c$dia), max(datos_dia_c$dia), by = "day")) |>
+  arrange(estacion, dia) |>
+  mutate(mes_d = month(dia)) |>
+  group_by(estacion, mes_d) |>
+  mutate(r25 = log(PM25) - mean(log(PM25), na.rm = TRUE),
+         r10 = log(PM10) - mean(log(PM10), na.rm = TRUE)) |>
+  ungroup() |>
+  arrange(estacion, dia)
+
+n_dias_est <- n_distinct(serie$dia)   # días del calendario por estación (1,095 en 2021-2023)
+```
+
+**Paso 2. Autocorrelación por estación hasta 30 días, prueba de Ljung-Box (7 rezagos) y tamaño de muestra efectivo.** Bajo un modelo AR(1), $n_{ef} = n(1-\rho_1)/(1+\rho_1)$ es el número de días independientes equivalentes.
+
+```{r}
+#| label: acf-tabla
+acf_est <- serie |>
+  group_by(estacion) |>
+  group_modify(\(d, k) map_dfr(c(PM2.5 = "r25", PM10 = "r10"), \(v) {
+    a <- acf(d[[v]], lag.max = 30, na.action = na.pass, plot = FALSE)$acf[, 1, 1]
+    tibble(lag = 0:30, acf = a)
+  }, .id = "contaminante")) |>
+  ungroup()
+
+lb <- serie |>
+  pivot_longer(c(r25, r10), names_to = "v", values_to = "r") |>
+  mutate(contaminante = if_else(v == "r25", "PM2.5", "PM10")) |>
+  group_by(estacion, contaminante) |>
+  summarise(n = sum(!is.na(r)),
+            p_LB = Box.test(na.omit(r), lag = 7, type = "Ljung-Box")$p.value,
+            .groups = "drop")
+
+tab_acf <- acf_est |> filter(lag %in% c(1, 7)) |>
+  pivot_wider(names_from = lag, values_from = acf, names_prefix = "rho_") |>
+  left_join(lb, by = c("estacion", "contaminante")) |>
+  mutate(n_ef = n * (1 - rho_1) / (1 + rho_1))
+
+acf_resumen <- tab_acf |> group_by(contaminante) |>
+  summarise(estaciones = n(),
+            `ρ(1) mín` = min(rho_1), `ρ(1) mediana` = median(rho_1), `ρ(1) máx` = max(rho_1),
+            `ρ(7) mediana` = median(rho_7), `días por estación` = median(n),
+            `n efectivo (mediana)` = median(n_ef),
+            `estaciones con p Ljung-Box < 0.05` = sum(p_LB < 0.05), .groups = "drop")
+
+kable(acf_resumen, digits = 2,
+      caption = "Autocorrelación de log PM diario sin ciclo mensual, 2021-2023")
+```
+
+```{r}
+#| label: acf-figura
+g_acf <- acf_est |> filter(lag > 0) |>
+  ggplot(aes(lag, acf, group = estacion)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = c(-1, 1) * 1.96 / sqrt(n_dias_est), linetype = 2, color = "grey40") +
+  geom_line(alpha = .6, color = "steelblue") +
+  facet_wrap(~contaminante) +
+  labs(x = "Rezago (días)", y = "Autocorrelación",
+       title = "Autocorrelación de log PM diario sin ciclo mensual, por estación (2021-2023)",
+       subtitle = "Líneas punteadas: banda ±1.96/√n esperada si los días fueran independientes")
+g_acf
+ggsave("salidas/acf_pm_diario.png", g_acf, width = 6.5, height = 3, dpi = 300)
+```
+
+**Paso 3. Dependencia entre años de una misma estación.** Con los promedios anuales de 2021-2023 se calcula la correlación intraclase (ICC) de la estación (qué parte de la variación anual se debe a la estación) y la correlación de Spearman entre el primer y el último año común.
+
+```{r}
+#| label: icc-anios
+anual_c <- anual |>
+  filter(anio %in% anios_comunes, !is.na(PM25), !is.na(PM10)) |>
+  mutate(estacion = droplevels(factor(estacion)))
+
+icc1 <- function(y, g) {
+  a <- anova(lm(y ~ g)); msb <- a[1, "Mean Sq"]; msw <- a[2, "Mean Sq"]; k <- mean(table(g))
+  (msb - msw) / (msb + (k - 1) * msw)
+}
+cor_anios <- function(v) {
+  w <- anual_c |> select(estacion, anio, all_of(v)) |>
+    pivot_wider(names_from = anio, values_from = all_of(v))
+  cor(w[[as.character(min(anios_comunes))]], w[[as.character(max(anios_comunes))]],
+      method = "spearman", use = "complete.obs")
+}
+
+icc_tab <- tibble(
+  contaminante = c("PM2.5", "PM10"),
+  `ICC de la estación (promedios anuales)` = c(icc1(log(anual_c$PM25), anual_c$estacion),
+                                               icc1(log(anual_c$PM10), anual_c$estacion)),
+  `ρ Spearman primer vs último año` = c(cor_anios("PM25"), cor_anios("PM10")))
+kable(icc_tab, digits = 2, caption = "Dependencia entre años de una misma estación, 2021-2023")
+```
+
+**Lectura.** Valores de $\rho_1$ claramente por encima de la banda punteada, pruebas de Ljung-Box significativas y un $n_{ef}$ mucho menor que los días del calendario indican que los días no aportan información independiente; un ICC alto indica que los años de una misma estación no son independientes entre sí.
+
 # Síntesis de hallazgos
 
 ## Tabla de hallazgos clave (calculada)
@@ -1084,15 +1244,16 @@ tibble(
 
 ## Síntesis interpretativa
 
-**[COMPLETAR después de correr el documento y revisar las secciones 5.1 a 5.13. Guía de lo que debe contestar]:**
+Las cifras provienen de las tablas y figuras de las secciones 5.1 a 5.14 (periodo común 2021-2023, 12 estaciones). Verifiquen cada una contra la salida antes de pasarla al reporte.
 
-- ¿Son comparables las estaciones (cobertura, años comunes)? ¿Hay que restringir a un periodo común?
-- ¿PM2.5 y PM10 se mueven juntas? ¿Se pueden resumir en un índice o conviene tratarlas por separado?
-- ¿La diferencia entre estaciones/zonas es grande frente a la variabilidad diaria? ¿Domina el "dónde", el "cuándo" o el año?
-- ¿La forma del ciclo anual es común a toda la ciudad o cambia por zona?
-- ¿Qué parte de las excedencias ocurre en qué meses y estaciones?
-- ¿Qué clima acompaña los meses altos y qué variables meteorológicas conviene llevar a la etapa de modelado?
-- **Cómo orienta esto el acotamiento del objetivo y los métodos de la Etapa 3** (PCA, conglomerados, PERMANOVA, regresión).
+- **Comparabilidad.** Solo 2021-2023 tienen las 12 estaciones con cobertura completa; NO3 opera únicamente en 2024-2025 y queda fuera de las comparaciones. Se restringe al periodo común y 2020, 2024 y 2025 se usan como contexto y para validar.
+- **PM2.5 y PM10.** Están correlacionadas de forma moderada (r de Pearson de 0.41 a 0.77 por estación) y ordenan distinto a las estaciones, por lo que se tratan por separado.
+- **Dónde y cuándo.** La estación y el mes explican cada uno cerca de 11.5 % de la variabilidad de log PM2.5 diario (el mes explica 13.5 % en PM10), y el año prácticamente nada; la zona explica menos que la estación (3.3 %). La media de PM2.5 va de 16.3 µg/m³ (SUR) a 28.1 (SE2).
+- **Forma del ciclo anual.** Es común a toda la ciudad: mínimo en septiembre y máximo en diciembre, con correlación mediana de 0.86 entre perfiles de estaciones. Las estaciones difieren sobre todo en nivel.
+- **Excedencias.** Siguen el mismo calendario (diciembre-enero el peor periodo); ninguna estación cumple la guía de la OMS más de 54 % de los días.
+- **Clima.** Los meses con más PM2.5 son los de menos viento y más frío; las asociaciones diarias son moderadas y la de la temperatura cambia de signo entre el año completo y las temporadas, por lo que hay que controlar estación y mes. Se llevan a modelado TOUT, RH, WSR, RAINF, SR, NO2 y CO.
+- **Dependencia temporal.** Con la autocorrelación de la sección 5.14, la autocorrelación mediana de orden 1 de log PM2.5 diario sin ciclo mensual es `r sprintf("%.2f", acf_resumen[["ρ(1) mediana"]][acf_resumen$contaminante == "PM2.5"])` y el tamaño de muestra efectivo mediano es `r round(acf_resumen[["n efectivo (mediana)"]][acf_resumen$contaminante == "PM2.5"])` días por estación frente a `r n_dias_est` días del calendario; los días no pueden tratarse como independientes.
+- **Cómo orienta esto el acotamiento del objetivo y los métodos de la siguiente etapa.** Se compara por estación y mes (no por zona). Los contrastes entre estaciones y meses usan un modelo lineal con errores AR(1) y bootstrap por bloques (Pinheiro y Bates, 2000; Künsch, 1989), no pruebas que permuten días libremente (como PERMANOVA). El PCA y los conglomerados se aplican a perfiles estación-mes y se validan por estabilidad y replicación en 2024-2025. Con regresión lineal múltiple y regresión logística se explican los días críticos con la meteorología.
 
 # Referencias {.unnumbered}
 
@@ -1100,7 +1261,11 @@ Instituto Nacional de Ecología y Cambio Climático (INECC). (2015). *Evaluació
 
 Johnson, R. A., & Wichern, D. W. (2007). *Applied multivariate statistical analysis* (6.ª ed.). Pearson Prentice Hall.
 
+Künsch, H. R. (1989). The jackknife and the bootstrap for general stationary observations. *The Annals of Statistics, 17*(3), 1217-1241. https://doi.org/10.1214/aos/1176347265
+
 Molina, M., Mena, C., Mediavilla Sahagún, A., Gómes Sánchez, M. D., Barrera Huertas, H. A., García Escalante, J., Hernández Valdez, N., Sánchez Martínez, S., Castillo, J. J., & Klakamp, J. (2019). *Análisis de la contaminación por PM2.5 en la ciudad de Monterrey, Nuevo León: identificación de medidas estratégicas de control* (Environmental report). Centro Mario Molina para Estudios Estratégicos sobre Energía y Medio Ambiente A.C.
+
+Pinheiro, J. C., & Bates, D. M. (2000). *Mixed-effects models in S and S-PLUS*. Springer. https://doi.org/10.1007/b98882
 
 Secretaría de Medio Ambiente y Recursos Naturales (SEMARNAT). (2019). *NOM-172-SEMARNAT-2019: Lineamientos para la obtención y comunicación del Índice de Calidad del Aire y Riesgos a la Salud* (Norma Oficial Mexicana). Diario Oficial de la Federación.
 
