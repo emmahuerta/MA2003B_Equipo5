@@ -1,0 +1,960 @@
+---
+title: "Etapa 3. Modelado y evaluación"
+subtitle: "Calidad del aire en la ZMM (SIMA) — Equipo 5"
+lang: es
+format:
+  html:
+    toc: true
+    code-fold: show
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+# 0. Cómo usar este documento
+
+Este documento sigue la metodología CRISP-DM en su fase de **Modelado y Evaluación** y se ejecuta de arriba hacia abajo, después de `1_ComprensionDeDatos.qmd` y `2_ExploracionDescriptiva.qmd`. Cada sección tiene un texto que explica qué se hace y por qué, y un bloque de código. Las referencias citadas en el texto están al final (formato APA).
+
+**Entradas** (se generan en la Etapa 2): `salidas/etapa2_datos_horarios.rds`, `salidas/etapa2_datos_diarios.rds`, `salidas/etapa2_datos_diarios_comunes.rds`.
+**Salidas** (de esta etapa): `salidas/etapa3_*.csv` (tablas) y `salidas/etapa3_modelos.rds` (modelos para la interfaz gráfica).
+
+Esta etapa responde con dos familias de técnicas (Johnson & Wichern, 2007; Hair et al., 2019):
+
+| Familia | Técnica | Objetivo de la Etapa 2 que responde |
+|---|---|---|
+| Interdependencia | Componentes principales (PCA) + conglomerados (Ward y k-medias) sobre el perfil mensual de cada estación | 1, 2 y 5 |
+| Dependencia | Modelo lineal con errores AR(1) + bootstrap por bloques (estación y mes) | 1, 2 y 3 |
+| Dependencia | Regresión lineal múltiple con errores AR(1) (más un bosque aleatorio como referencia) | 4 |
+| Dependencia | Regresión logística con ecuaciones de estimación generalizadas (GEE) con correlación AR(1) | 4 |
+
+## 0.1 Paquetes y parámetros
+
+Se instalan solo los paquetes que falten. Los parámetros están juntos para poder cambiarlos sin tocar el resto del código. Las repeticiones del bootstrap (`B_boot`) se pueden bajar a 200 para una primera prueba rápida.
+
+```{r}
+#| label: paquetes
+paquetes <- c("tidyverse", "lubridate", "scales", "knitr", "nlme", "emmeans",
+              "car", "geepack", "pROC", "ranger", "cluster")
+faltan <- setdiff(paquetes, rownames(installed.packages()))
+if (length(faltan) > 0) install.packages(faltan)
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(knitr)
+library(nlme)
+library(emmeans)
+library(geepack)
+library(pROC)
+library(ranger)
+library(cluster)
+
+theme_set(theme_minimal(base_size = 11))
+options(knitr.kable.NA = "")
+set.seed(2026)
+dir.create("salidas", showWarnings = FALSE)
+```
+
+```{r}
+#| label: parametros
+# ---- Periodos ---------------------------------------------------------------
+anios_comunes <- 2021:2023   # periodo común (12 estaciones completas): entrenamiento
+anios_prueba  <- 2024:2025   # periodo de validación temporal
+min_dias_mes  <- 20          # días válidos mínimos para aceptar un promedio estación-mes
+
+# ---- Análisis de interdependencia (PCA + conglomerados) ---------------------
+k_pc <- 2                    # componentes que se conservan (se confirma en 3.2)
+k_cl <- 3                    # número de grupos (se confirma en 3.3 con la silueta)
+
+# ---- Bootstrap ---------------------------------------------------------------
+B_boot <- 500                # repeticiones para el PCA/conglomerados y para el ordenamiento
+
+# ---- Día crítico -------------------------------------------------------------
+# NULL = norma NOM-025-SSA1 vigente cada año (como en la Etapa 2);
+# un número (p. ej. 41) = umbral fijo para todos los años (prueba de sensibilidad)
+umbral_fijo <- NULL
+
+# ---- Límites de referencia (µg/m³) -------------------------------------------
+# NOM-025-SSA1-2014 (2020-2021) y NOM-025-SSA1-2021 con cumplimiento gradual (2022-2025);
+# guías de la OMS 2021 (Secretaría de Salud, 2021; World Health Organization, 2021)
+lim_norma <- tribble(
+  ~anio, ~PM25_24h, ~PM10_24h,
+  2020,  45, 75,   2021,  45, 75,
+  2022,  41, 70,   2023,  41, 70,
+  2024,  33, 60,   2025,  33, 60
+)
+lim_oms <- c(PM25_24h = 15, PM10_24h = 45)
+
+meses_es <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+```
+
+# 1. Carga de datos
+
+Se leen las bases diarias de la Etapa 2 (promedios de 24 h con al menos 18 horas válidas; la norma evalúa el material particulado con promedios de 24 h, Secretaría de Salud, 2021). Se verifica que existan las columnas necesarias y se resume la cobertura.
+
+```{r}
+#| label: carga
+datos_dia   <- readRDS("salidas/etapa2_datos_diarios.rds")          # todos los años
+datos_dia_c <- readRDS("salidas/etapa2_datos_diarios_comunes.rds")  # 2021-2023
+datos_e2    <- readRDS("salidas/etapa2_datos_horarios.rds")         # horaria (para la imputación)
+
+stopifnot(all(c("estacion", "zona", "msnm", "anio", "mes", "mes_lab", "temporada", "dia",
+                "PM25", "PM10", "TOUT", "RH", "WSR", "RAINF", "SR", "NO2", "CO") %in% names(datos_dia)))
+
+est_c <- levels(droplevels(datos_dia_c$estacion))    # las 12 estaciones del periodo común
+cat_est <- datos_dia |> distinct(estacion, zona, msnm) |> mutate(estacion = as.character(estacion))
+
+tibble(Base = c("Diaria (todos los años)", "Diaria periodo común"),
+       `Estación-días` = c(nrow(datos_dia), nrow(datos_dia_c)),
+       Estaciones = c(n_distinct(datos_dia$estacion), length(est_c))) |>
+  kable(format.args = list(big.mark = ","), caption = "Bases diarias de entrada")
+```
+
+Los analizadores cambiaron en 2021 (O3, NO2, SO2 y CO, salvo en SE2, SO2 y NTE2; sensores de viento en todas las estaciones) y en 2025 (equipos nuevos de PM2.5 en SE2, NTE2, SUR, SO2 y NO; CO nuevo en SE2, SO2 y NTE2; bombas nuevas en los BAM de PM10), según el socio formador. Por eso el entrenamiento se limita a 2021–2023, que queda después de la renovación de 2021, y la validación en 2024–2025 se revisa por año (sección 5.5). Antes de modelar se revisa cuántos días faltan por variable y estación, sobre todo CO, que en SE2, SO2 y NTE2 no tuvo equipo propio en 2021–2024.
+
+```{r}
+#| label: faltantes
+datos_dia |>
+  filter(estacion %in% est_c) |>
+  group_by(estacion) |>
+  summarise(across(c(PM25, PM10, TOUT, RH, WSR, RAINF, SR, NO2, CO),
+                   \(x) round(mean(is.na(x)) * 100, 1)), .groups = "drop") |>
+  kable(caption = "% de estación-días sin dato por variable (todos los años, 12 estaciones)")
+```
+
+# 2. Objetivo vigente
+
+El objetivo de la Etapa 2 es la referencia. Al final de la etapa (sección 8) se revisa y se actualiza con lo que muestren los resultados.
+
+> **Objetivo (Etapa 2).** Estimar y comparar, por estación y por mes, el nivel de PM2.5 y PM10 y la proporción de días que superan la NOM-025-SSA1-2021 y la guía de la OMS; determinar si las diferencias son significativas considerando la dependencia temporal; evaluar qué condiciones meteorológicas y de otros contaminantes se asocian con los días críticos; y determinar si las estaciones forman grupos de exposición distintos.
+
+# 3. Técnicas de interdependencia: PCA y conglomerados
+
+## 3.1 Perfil mensual de cada estación
+
+El PCA y los conglomerados se aplican al perfil mensual de cada estación: 12 individuos (estaciones) y 24 variables (logaritmo de la media mensual de PM2.5 y PM10 en cada mes). El logaritmo reduce la asimetría de la cola derecha vista en la Etapa 2.
+
+Para poder remuestrear después con bootstrap, el perfil se calcula a partir de **celdas** (año × semana ISO × mes) en las que se acumulan sumas y conteos por estación. El perfil original equivale al promedio de todos los días de cada estación-mes del periodo 2021–2023.
+
+```{r}
+#| label: celdas
+agg <- datos_dia_c |>
+  mutate(estacion = droplevels(estacion),
+         cel = paste(anio, isoweek(dia), mes, sep = "_")) |>
+  group_by(cel, mes, estacion) |>
+  summarise(s25 = sum(PM25, na.rm = TRUE), n25 = sum(!is.na(PM25)),
+            s10 = sum(PM10, na.rm = TRUE), n10 = sum(!is.na(PM10)), .groups = "drop")
+
+celdas <- agg |> distinct(cel, mes) |> arrange(mes, cel)
+
+# matriz celdas x estaciones para cada acumulado
+mat_cel <- function(col) {
+  agg |> select(cel, estacion, all_of(col)) |>
+    pivot_wider(names_from = estacion, values_from = all_of(col), values_fill = 0) |>
+    arrange(match(cel, celdas$cel)) |>
+    (\(d) as.matrix(d[, est_c]))()
+}
+S25 <- mat_cel("s25"); N25 <- mat_cel("n25"); S10 <- mat_cel("s10"); N10 <- mat_cel("n10")
+idx_mes <- split(seq_len(nrow(celdas)), celdas$mes)   # filas de cada mes
+
+# perfil (estaciones x 24 variables) a partir de una lista de 12 vectores de celdas
+perfil_desde <- function(idx) {
+  out <- matrix(NA_real_, length(est_c), 24,
+                dimnames = list(est_c, c(paste0("PM25_", meses_es), paste0("PM10_", meses_es))))
+  for (m in 1:12) {
+    i <- idx[[m]]
+    out[, m]      <- log(colSums(S25[i, , drop = FALSE]) / colSums(N25[i, , drop = FALSE]))
+    out[, 12 + m] <- log(colSums(S10[i, , drop = FALSE]) / colSums(N10[i, , drop = FALSE]))
+  }
+  out
+}
+
+X <- perfil_desde(idx_mes)
+stopifnot(!anyNA(X), all(is.finite(X)))
+dim(X)
+```
+
+## 3.2 Componentes principales
+
+Se estandarizan las 24 variables (media 0, varianza 1) para que los contaminantes y los meses pesen igual, y se calcula el PCA con `prcomp`. Con solo 12 estaciones, el máximo de componentes con varianza es 11, así que los ejes se interpretan de forma descriptiva y se evalúa su estabilidad por bootstrap (sección 3.5). Para decidir cuántos componentes conservar se usan la varianza acumulada, el criterio de Kaiser (valor propio > 1) y el criterio de la vara quebrada (Jackson, 1993).
+
+```{r}
+#| label: pca
+pca <- prcomp(X, center = TRUE, scale. = TRUE)
+eig <- pca$sdev^2
+r   <- sum(eig > 1e-10)
+vara_q <- sapply(1:r, \(k) sum(1 / (k:r)) / r)     # vara quebrada
+
+tab_eig <- tibble(Componente = paste0("PC", 1:r),
+                  `Valor propio` = eig[1:r],
+                  `% varianza` = eig[1:r] / sum(eig) * 100,
+                  `% acumulado` = cumsum(eig[1:r]) / sum(eig) * 100,
+                  `Vara quebrada (%)` = vara_q * 100)
+kable(tab_eig, digits = 2, caption = "Valores propios y varianza explicada")
+```
+
+```{r}
+#| label: fig-scree
+ggplot(tab_eig, aes(seq_along(Componente), `% varianza`)) +
+  geom_col(fill = "grey70") +
+  geom_line(aes(y = `Vara quebrada (%)`), colour = "firebrick") +
+  geom_point(aes(y = `Vara quebrada (%)`), colour = "firebrick") +
+  scale_x_continuous(breaks = 1:r) +
+  labs(x = "Componente", y = "% de varianza",
+       title = "Gráfico de sedimentación (rojo: vara quebrada)")
+```
+
+Se revisan las cargas (qué variables definen cada eje) y las puntuaciones de las estaciones. Si los 12 meses de PM2.5 y PM10 cargan con el mismo signo en PC1, ese eje es de **nivel general de exposición**; PC2 suele capturar diferencias de **forma** (por ejemplo, PM10 frente a PM2.5 o el calendario).
+
+```{r}
+#| label: cargas
+cargas <- as_tibble(pca$rotation[, 1:max(k_pc, 3)], rownames = "variable") |>
+  separate(variable, c("contaminante", "mes"), sep = "_", remove = FALSE) |>
+  mutate(mes = factor(mes, meses_es))
+
+cargas |>
+  pivot_longer(starts_with("PC"), names_to = "PC", values_to = "carga") |>
+  filter(PC %in% paste0("PC", 1:max(k_pc, 3))) |>
+  ggplot(aes(mes, carga, colour = contaminante, group = contaminante)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line() + geom_point() + facet_wrap(~PC, ncol = 1) +
+  labs(x = NULL, y = "Carga", colour = NULL, title = "Cargas de los primeros componentes")
+```
+
+```{r}
+#| label: scores
+scores <- as_tibble(pca$x[, 1:max(k_pc, 3)], rownames = "estacion") |>
+  left_join(cat_est, by = "estacion")
+
+ggplot(scores, aes(PC1, PC2, label = estacion, colour = zona)) +
+  geom_hline(yintercept = 0, colour = "grey80") + geom_vline(xintercept = 0, colour = "grey80") +
+  geom_point(size = 2.5) + geom_text(vjust = -0.8, show.legend = FALSE) +
+  labs(x = sprintf("PC1 (%.1f%%)", tab_eig$`% varianza`[1]),
+       y = sprintf("PC2 (%.1f%%)", tab_eig$`% varianza`[2]),
+       title = "Estaciones en el plano de los dos primeros componentes")
+```
+
+Como validación del eje de nivel, se correlaciona PC1 con el PM2.5 medio de la estación (de la Etapa 2) y con la elevación. Una correlación alta con el PM2.5 medio confirma la lectura del eje; una correlación baja con la elevación confirma lo visto en la Etapa 2.
+
+```{r}
+#| label: pc1-validacion
+nivel <- datos_dia_c |> group_by(estacion = as.character(estacion)) |>
+  summarise(PM25_medio = mean(PM25, na.rm = TRUE), PM10_medio = mean(PM10, na.rm = TRUE))
+chk <- scores |> left_join(nivel, by = "estacion")
+tibble(Comparación = c("PC1 vs PM2.5 medio", "PC1 vs PM10 medio", "PC1 vs elevación (msnm)",
+                       "PC2 vs PM2.5 medio", "PC2 vs PM10 medio", "PC2 vs elevación (msnm)"),
+       `r de Spearman` = c(cor(chk$PC1, chk$PM25_medio, method = "spearman"),
+                           cor(chk$PC1, chk$PM10_medio, method = "spearman"),
+                           cor(chk$PC1, chk$msnm, method = "spearman"),
+                           cor(chk$PC2, chk$PM25_medio, method = "spearman"),
+                           cor(chk$PC2, chk$PM10_medio, method = "spearman"),
+                           cor(chk$PC2, chk$msnm, method = "spearman"))) |>
+  kable(digits = 2)
+```
+
+## 3.3 Conglomerados de estaciones
+
+Los grupos se forman sobre las puntuaciones de los primeros `k_pc` componentes (no sobre las 24 variables originales, que son redundantes). Se usan dos métodos y se comparan: jerárquico de Ward (Ward, 1963; `ward.D2` sobre distancias euclidianas) y k-medias (`nstart = 50`). El número de grupos se elige con el ancho medio de silueta (Rousseeuw, 1987); la zona y la elevación **no** entran en el agrupamiento y solo se usan para describir los grupos después.
+
+```{r}
+#| label: clusters
+Z <- pca$x[, 1:k_pc, drop = FALSE]
+d <- dist(Z)
+hc <- hclust(d, method = "ward.D2")
+
+sil_k <- map_dfr(2:5, \(k) {
+  km <- kmeans(Z, centers = k, nstart = 50)
+  tibble(k = k,
+         `Silueta Ward`    = mean(silhouette(cutree(hc, k), d)[, "sil_width"]),
+         `Silueta k-medias` = mean(silhouette(km$cluster, d)[, "sil_width"]))
+})
+kable(sil_k, digits = 3, caption = "Ancho medio de silueta por número de grupos")
+```
+
+```{r}
+#| label: dendrograma
+plot(hc, hang = -1, main = "Dendrograma (Ward) sobre los componentes principales", xlab = "", sub = "")
+rect.hclust(hc, k = k_cl, border = "firebrick")
+```
+
+Los grupos se ordenan de menor a mayor PM2.5 medio y se nombran en ese orden (el grupo 1 es el de menor exposición). Se compara el resultado de Ward con el de k-medias mediante el índice de Rand ajustado (ARI; 1 = grupos idénticos).
+
+```{r}
+#| label: clusters-final
+ari <- function(a, b) {
+  tab <- table(a, b); n <- sum(tab); c2 <- function(x) x * (x - 1) / 2
+  s <- sum(c2(tab)); sa <- sum(c2(rowSums(tab))); sb <- sum(c2(colSums(tab)))
+  e <- sa * sb / c2(n); (s - e) / ((sa + sb) / 2 - e)
+}
+
+cl_w <- cutree(hc, k_cl)
+km   <- kmeans(Z, centers = k_cl, nstart = 50)
+cat("ARI Ward vs k-medias:", round(ari(cl_w, km$cluster), 3), "\n")
+
+# reetiquetar de menor a mayor PM2.5 medio
+orden_cl <- tibble(estacion = names(cl_w), cl = cl_w) |>
+  left_join(nivel, by = "estacion") |>
+  group_by(cl) |> summarise(m = mean(PM25_medio)) |> arrange(m) |>
+  mutate(grupo = row_number())
+grupo_est <- tibble(estacion = names(cl_w), cl = cl_w) |>
+  left_join(orden_cl |> select(cl, grupo), by = "cl") |>
+  select(estacion, grupo) |>
+  left_join(cat_est, by = "estacion") |> left_join(nivel, by = "estacion") |>
+  arrange(grupo, PM25_medio)
+
+kable(grupo_est, digits = 1, caption = "Grupos de exposición (Ward), de menor (1) a mayor")
+write_csv(grupo_est, "salidas/etapa3_grupos_estaciones.csv")
+```
+
+```{r}
+#| label: caracteriza-grupos
+grupo_est |>
+  group_by(grupo) |>
+  summarise(Estaciones = paste(estacion, collapse = ", "),
+            n = n(), `PM2.5 medio` = mean(PM25_medio), `PM10 medio` = mean(PM10_medio),
+            `Elevación media (msnm)` = mean(msnm),
+            Zonas = paste(sort(unique(zona)), collapse = ", ")) |>
+  kable(digits = 1, caption = "Características de cada grupo")
+```
+
+## 3.4 Perfil mensual de cada grupo
+
+Para interpretar los grupos se grafica el perfil mensual de PM2.5 de cada estación coloreado por grupo. Si los grupos difieren sobre todo en nivel (y no en forma), las curvas serán paralelas, en línea con la correlación mediana de 0.86 entre perfiles de la Etapa 2.
+
+```{r}
+#| label: perfil-grupos
+exp(X[, 1:12]) |> as_tibble(rownames = "estacion") |>
+  pivot_longer(-estacion, names_to = "mes", values_to = "PM25") |>
+  mutate(mes = factor(str_remove(mes, "PM25_"), meses_es)) |>
+  left_join(grupo_est |> select(estacion, grupo), by = "estacion") |>
+  ggplot(aes(mes, PM25, group = estacion, colour = factor(grupo))) +
+  geom_line() + labs(x = NULL, y = "PM2.5 medio (µg/m³)", colour = "Grupo",
+                     title = "Perfil mensual de PM2.5 por estación y grupo, 2021–2023")
+```
+
+## 3.5 Estabilidad de los grupos por bootstrap por bloques
+
+Con 12 estaciones, una prueba de hipótesis sobre los mismos datos con que se formaron los grupos no sería válida. En cambio, se evalúa la **estabilidad** (Hennig, 2007): se remuestrean semanas completas dentro de cada mes (con todas las estaciones juntas, para conservar la autocorrelación diaria y la correlación entre estaciones vecinas; Künsch, 1989), se recalcula el perfil, el PCA y el agrupamiento, y se mide con qué frecuencia cada par de estaciones queda en el mismo grupo. Una frecuencia cercana a 1 (o a 0) indica pares estables.
+
+```{r}
+#| label: boot-grupos
+boot_grupos <- function() {
+  idx <- lapply(idx_mes, \(i) i[sample.int(length(i), length(i), replace = TRUE)])
+  Xb <- perfil_desde(idx)
+  if (anyNA(Xb) || any(apply(Xb, 2, sd) == 0)) return(NULL)
+  Zb <- prcomp(Xb, center = TRUE, scale. = TRUE)$x[, 1:k_pc, drop = FALSE]
+  cutree(hclust(dist(Zb), method = "ward.D2"), k_cl)
+}
+
+co <- matrix(0, length(est_c), length(est_c), dimnames = list(est_c, est_c)); n_ok <- 0
+ari_b <- numeric(0)
+for (b in seq_len(B_boot)) {
+  cb <- boot_grupos(); if (is.null(cb)) next
+  co <- co + outer(cb, cb, "=="); n_ok <- n_ok + 1
+  ari_b <- c(ari_b, ari(cl_w[est_c], cb))
+}
+co <- co / n_ok
+
+cat("Réplicas válidas:", n_ok, "| ARI mediano contra los grupos originales:",
+    round(median(ari_b), 3), "| percentil 5:", round(quantile(ari_b, 0.05), 3), "\n")
+
+# estabilidad por estación: promedio de co-pertenencia con sus compañeras de grupo original
+estab <- tibble(estacion = est_c, grupo_orig = cl_w[est_c]) |>
+  mutate(estabilidad = map2_dbl(estacion, grupo_orig, \(e, g) {
+    mates <- setdiff(names(cl_w)[cl_w == g], e)
+    if (length(mates) == 0) NA_real_ else mean(co[e, mates])
+  })) |>
+  left_join(grupo_est |> select(estacion, grupo), by = "estacion")
+kable(estab |> arrange(grupo, desc(estabilidad)) |> select(estacion, grupo, estabilidad),
+      digits = 2, caption = "Estabilidad por estación (frecuencia con que queda con sus compañeras de grupo)")
+```
+
+```{r}
+#| label: fig-coocurrencia
+ord <- grupo_est$estacion
+as_tibble(co[ord, ord], rownames = "e1") |>
+  pivot_longer(-e1, names_to = "e2", values_to = "frecuencia") |>
+  mutate(e1 = factor(e1, ord), e2 = factor(e2, rev(ord))) |>
+  ggplot(aes(e1, e2, fill = frecuencia)) + geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", frecuencia)), size = 2.5) +
+  scale_fill_gradient(low = "white", high = "firebrick", limits = c(0, 1)) +
+  labs(x = NULL, y = NULL, title = "Frecuencia de co-pertenencia al mismo grupo (bootstrap)")
+```
+
+## 3.6 Replicación en otros años (puntos suplementarios)
+
+Los perfiles de cada estación-año se proyectan en el PCA ya calculado (sin reajustarlo) y se asignan al grupo de centroide más cercano. Los años 2021–2023 muestran cuánto cambia el grupo de un año a otro; 2024–2025 son la validación fuera del periodo de entrenamiento. Solo se usan estación-años con los 12 meses válidos (al menos `min_dias_mes` días por mes).
+
+```{r}
+#| label: replicacion
+perfil_anio <- datos_dia |>
+  mutate(estacion = as.character(estacion)) |>
+  group_by(estacion, anio, mes_lab) |>
+  summarise(n25 = sum(!is.na(PM25)), n10 = sum(!is.na(PM10)),
+            PM25 = mean(PM25, na.rm = TRUE), PM10 = mean(PM10, na.rm = TRUE), .groups = "drop") |>
+  filter(n25 >= min_dias_mes, n10 >= min_dias_mes) |>
+  mutate(PM25 = log(PM25), PM10 = log(PM10)) |>
+  pivot_wider(id_cols = c(estacion, anio), names_from = mes_lab,
+              values_from = c(PM25, PM10), names_glue = "{.value}_{mes_lab}") |>
+  drop_na()
+
+Xa <- as.matrix(perfil_anio[, colnames(X)])
+Za <- scale(Xa, center = pca$center, scale = pca$scale) %*% pca$rotation[, 1:k_pc, drop = FALSE]
+
+# centroides de los grupos originales en el espacio de los componentes
+cent <- t(sapply(sort(unique(grupo_est$grupo)), \(g)
+                 colMeans(Z[grupo_est$estacion[grupo_est$grupo == g], , drop = FALSE])))
+asigna <- \(z) which.min(colSums((t(cent) - z)^2))
+
+rep_tab <- perfil_anio |> select(estacion, anio) |>
+  mutate(grupo_anio = apply(Za, 1, asigna)) |>
+  left_join(grupo_est |> select(estacion, grupo_orig = grupo), by = "estacion") |>
+  mutate(coincide = grupo_anio == grupo_orig)
+
+rep_tab |>
+  filter(!is.na(grupo_orig)) |>
+  group_by(Periodo = if_else(anio %in% anios_comunes, "2021–2023", "2024–2025")) |>
+  summarise(`Estación-años` = n(), `% que conserva su grupo` = mean(coincide) * 100) |>
+  kable(digits = 1, caption = "Replicación de los grupos con perfiles anuales")
+
+rep_tab |> mutate(grupo_anio = as.character(grupo_anio)) |>
+  select(estacion, anio, grupo_anio) |>
+  pivot_wider(names_from = anio, values_from = grupo_anio) |>
+  left_join(grupo_est |> select(estacion, `grupo original` = grupo), by = "estacion") |>
+  kable(caption = "Grupo asignado por estación y año (vacío: sin año válido; NO3 no estaba en el periodo común)")
+```
+
+# 4. Dependencia: nivel por estación y mes con errores AR(1) y bootstrap por bloques
+
+## 4.1 Modelo lineal con errores AR(1)
+
+Los días consecutivos de una estación están autocorrelacionados (Etapa 2: AR(1) del log PM2.5 de 0.44 a 0.70). Una ANOVA ordinaria trataría los 1,095 días de cada estación como independientes y daría pruebas demasiado optimistas. Por ello se ajusta, por contaminante, el modelo
+
+$$\log(PM_{it}) = \mu + \alpha_i + \beta_{m(t)} + \varepsilon_{it}, \qquad \varepsilon_{it} = \phi\,\varepsilon_{i,t-1} + u_{it},$$
+
+con estación $i$ y mes $m$ como factores y errores AR(1) dentro de cada estación, con `nlme::gls` (Pinheiro & Bates, 2000). Se compara con el modelo sin correlación mediante una prueba de razón de verosimilitudes y se contrastan los factores con pruebas F marginales. La respuesta se modela en logaritmos (cola derecha, Etapa 2), así que los efectos se leen como cambios proporcionales.
+
+```{r}
+#| label: gls-ar1
+dd <- datos_dia_c |>
+  mutate(estacion = droplevels(estacion), t = as.integer(dia - min(dia)) + 1L)
+
+ajusta_gls <- function(v) {
+  d <- dd |> filter(!is.na(.data[[v]])) |> arrange(estacion, dia) |>
+    mutate(y = log(.data[[v]])) |> as.data.frame()
+  m0 <- gls(y ~ estacion + mes_lab, data = d, method = "ML")
+  m1 <- gls(y ~ estacion + mes_lab, data = d, method = "ML",
+            correlation = corAR1(form = ~ t | estacion))
+  list(d = d, m0 = m0, m1 = m1)
+}
+mod_nivel <- list(PM25 = ajusta_gls("PM25"), PM10 = ajusta_gls("PM10"))
+
+res_nivel <- imap_dfr(mod_nivel, \(m, v) {
+  lrt <- anova(m$m0, m$m1)
+  phi <- coef(m$m1$modelStruct$corStruct, unconstrained = FALSE)
+  tibble(Contaminante = v, n = nrow(m$d), `phi (AR1)` = as.numeric(phi),
+         `AIC sin AR1` = AIC(m$m0), `AIC con AR1` = AIC(m$m1),
+         `p (LRT)` = lrt$`p-value`[2])
+})
+kable(res_nivel, digits = 3, caption = "Efecto de modelar la autocorrelación")
+```
+
+```{r}
+#| label: anova-gls
+imap_dfr(mod_nivel, \(m, v) {
+  a <- anova(m$m1, type = "marginal")
+  tibble(Contaminante = v, Factor = rownames(a)[-1],
+         gl = a$numDF[-1], F = a$`F-value`[-1], p = a$`p-value`[-1])
+}) |> kable(digits = 4, caption = "Pruebas F marginales (errores AR(1))")
+```
+
+## 4.2 Supuestos del modelo
+
+Se revisan (i) que el AR(1) elimine la autocorrelación (autocorrelación de orden 1 de los residuos por estación, antes y después) y (ii) la normalidad y la varianza constante de los residuos normalizados.
+
+```{r}
+#| label: supuestos-nivel
+lag1 <- \(x) acf(x, lag.max = 1, plot = FALSE, na.action = na.pass)$acf[2]
+
+imap_dfr(mod_nivel, \(m, v) {
+  d <- m$d
+  d$r_ols <- resid(m$m0, type = "response")
+  d$r_ar1 <- resid(m$m1, type = "normalized")
+  d |> group_by(estacion) |>
+    summarise(`r1 sin AR(1)` = lag1(r_ols), `r1 con AR(1)` = lag1(r_ar1), .groups = "drop") |>
+    mutate(Contaminante = v, .before = 1)
+}) |> kable(digits = 2, caption = "Autocorrelación de orden 1 de los residuos, por estación")
+```
+
+```{r}
+#| label: fig-supuestos-nivel
+imap_dfr(mod_nivel, \(m, v)
+  tibble(Contaminante = v, ajustado = fitted(m$m1), residuo = resid(m$m1, type = "normalized"))) |>
+  ggplot(aes(sample = residuo)) + stat_qq(size = 0.4, alpha = 0.4) + stat_qq_line(colour = "firebrick") +
+  facet_wrap(~Contaminante) + labs(title = "QQ de los residuos normalizados", x = "Teórico", y = "Observado")
+
+imap_dfr(mod_nivel, \(m, v)
+  tibble(Contaminante = v, ajustado = fitted(m$m1), residuo = resid(m$m1, type = "normalized"))) |>
+  ggplot(aes(ajustado, residuo)) + geom_point(size = 0.4, alpha = 0.3) +
+  geom_hline(yintercept = 0, colour = "firebrick") + facet_wrap(~Contaminante, scales = "free_x") +
+  labs(title = "Residuos normalizados vs ajustado", x = "log(µg/m³) ajustado", y = "Residuo")
+```
+
+## 4.3 Medias estimadas por estación y mes
+
+Las medias marginales estimadas (`emmeans`) usan los errores estándar corregidos por la autocorrelación y se retransforman a µg/m³ (media geométrica, por trabajarse en logaritmos).
+
+```{r}
+#| label: emmeans
+emm_est <- imap_dfr(mod_nivel, \(m, v)
+  as_tibble(summary(emmeans(m$m1, ~ estacion, data = m$d))) |>
+    transmute(Contaminante = v, estacion, `Media geométrica` = exp(emmean), LI = exp(lower.CL), LS = exp(upper.CL)))
+emm_mes <- imap_dfr(mod_nivel, \(m, v)
+  as_tibble(summary(emmeans(m$m1, ~ mes_lab, data = m$d))) |>
+    transmute(Contaminante = v, mes = mes_lab, `Media geométrica` = exp(emmean), LI = exp(lower.CL), LS = exp(upper.CL)))
+
+write_csv(emm_est, "salidas/etapa3_emmeans_estacion.csv")
+write_csv(emm_mes, "salidas/etapa3_emmeans_mes.csv")
+
+emm_est |> filter(Contaminante == "PM25") |> arrange(`Media geométrica`) |>
+  kable(digits = 1, caption = "PM2.5: media geométrica estimada por estación (IC 95 %, errores AR(1))")
+```
+
+```{r}
+#| label: fig-emmeans
+bind_rows(emm_est |> rename(nivel = estacion) |> mutate(tipo = "Estación"),
+          emm_mes |> rename(nivel = mes) |> mutate(tipo = "Mes")) |>
+  group_by(Contaminante, tipo) |> mutate(nivel = fct_reorder(nivel, `Media geométrica`)) |> ungroup() |>
+  ggplot(aes(`Media geométrica`, nivel)) +
+  geom_pointrange(aes(xmin = LI, xmax = LS), size = 0.3) +
+  facet_grid(tipo ~ Contaminante, scales = "free") +
+  labs(x = "µg/m³", y = NULL, title = "Medias estimadas por estación y mes (IC 95 %)")
+```
+
+## 4.4 Bootstrap por bloques: ordenamiento y excedencias
+
+El modelo AR(1) no captura la correlación entre estaciones vecinas. Por eso los intervalos del **ordenamiento** de estaciones y del **porcentaje de días sobre el límite** se obtienen con bootstrap por bloques (Künsch, 1989): se remuestrean semanas completas (año × semana ISO) con todas las estaciones juntas. Las excedencias usan la norma vigente cada año y la guía de la OMS.
+
+```{r}
+#| label: boot-orden
+boot_orden <- function(v) {
+  lim_n <- lim_norma |> transmute(anio, lim_nom = .data[[paste0(v, "_24h")]])
+  a <- datos_dia_c |>
+    mutate(estacion = droplevels(estacion), cel = paste(anio, isoweek(dia))) |>
+    left_join(lim_n, by = "anio") |>
+    filter(!is.na(.data[[v]])) |>
+    mutate(x = .data[[v]],
+           ex_oms = as.integer(x > lim_oms[[paste0(v, "_24h")]]),
+           ex_nom = as.integer(x > lim_nom)) |>
+    group_by(cel, estacion) |>
+    summarise(s = sum(x), n = n(), eo = sum(ex_oms), en = sum(ex_nom), .groups = "drop")
+  cels <- unique(a$cel)
+  mk <- \(col) a |> select(cel, estacion, all_of(col)) |>
+    pivot_wider(names_from = estacion, values_from = all_of(col), values_fill = 0) |>
+    arrange(match(cel, cels)) |> (\(d) as.matrix(d[, est_c]))()
+  S <- mk("s"); N <- mk("n"); EO <- mk("eo"); EN <- mk("en")
+
+  est_punto <- \(w) {
+    m <- rbind(as.numeric((w %*% S) / (w %*% N)),
+               as.numeric(100 * (w %*% EO) / (w %*% N)),
+               as.numeric(100 * (w %*% EN) / (w %*% N)))
+    dimnames(m) <- list(c("media", "oms", "nom"), est_c)
+    m
+  }
+  w0 <- rep(1, length(cels)); p0 <- est_punto(w0)
+
+  bt <- array(NA_real_, c(B_boot, 3, length(est_c)), dimnames = list(NULL, c("media", "oms", "nom"), est_c))
+  rk <- matrix(NA_real_, B_boot, length(est_c), dimnames = list(NULL, est_c))
+  for (b in 1:B_boot) {
+    w <- tabulate(sample.int(length(cels), length(cels), replace = TRUE), nbins = length(cels))
+    p <- est_punto(w); bt[b, , ] <- p; rk[b, ] <- rank(p["media", ])
+  }
+  q <- \(x) quantile(x, c(0.025, 0.975), na.rm = TRUE)
+  tibble(Contaminante = v, estacion = est_c,
+         media = p0["media", ], media_LI = apply(bt[, "media", ], 2, \(x) q(x)[1]), media_LS = apply(bt[, "media", ], 2, \(x) q(x)[2]),
+         rango_med = apply(rk, 2, median), rango_LI = apply(rk, 2, \(x) q(x)[1]), rango_LS = apply(rk, 2, \(x) q(x)[2]),
+         oms = p0["oms", ], oms_LI = apply(bt[, "oms", ], 2, \(x) q(x)[1]), oms_LS = apply(bt[, "oms", ], 2, \(x) q(x)[2]),
+         nom = p0["nom", ], nom_LI = apply(bt[, "nom", ], 2, \(x) q(x)[1]), nom_LS = apply(bt[, "nom", ], 2, \(x) q(x)[2]))
+}
+orden_boot <- bind_rows(boot_orden("PM25"), boot_orden("PM10"))
+write_csv(orden_boot, "salidas/etapa3_orden_bootstrap.csv")
+
+orden_boot |> filter(Contaminante == "PM25") |> arrange(media) |>
+  transmute(Estación = estacion,
+            `Media (IC 95 %)` = sprintf("%.1f (%.1f–%.1f)", media, media_LI, media_LS),
+            `Rango (IC 95 %)` = sprintf("%.0f (%.0f–%.0f)", rango_med, rango_LI, rango_LS),
+            `% sobre OMS` = sprintf("%.1f (%.1f–%.1f)", oms, oms_LI, oms_LS),
+            `% sobre NOM` = sprintf("%.1f (%.1f–%.1f)", nom, nom_LI, nom_LS)) |>
+  kable(caption = "PM2.5, 2021–2023: nivel, ordenamiento (1 = menor) y excedencias con IC por bootstrap por bloques")
+```
+
+```{r}
+#| label: tabla-pm10
+orden_boot |> filter(Contaminante == "PM10") |> arrange(media) |>
+  transmute(Estación = estacion,
+            `Media (IC 95 %)` = sprintf("%.1f (%.1f–%.1f)", media, media_LI, media_LS),
+            `Rango (IC 95 %)` = sprintf("%.0f (%.0f–%.0f)", rango_med, rango_LI, rango_LS),
+            `% sobre OMS` = sprintf("%.1f (%.1f–%.1f)", oms, oms_LI, oms_LS),
+            `% sobre NOM` = sprintf("%.1f (%.1f–%.1f)", nom, nom_LI, nom_LS)) |>
+  kable(caption = "PM10, 2021–2023: nivel, ordenamiento (1 = menor) y excedencias con IC por bootstrap por bloques")
+```
+
+# 5. Dependencia: regresión múltiple del PM2.5 diario con meteorología y otros contaminantes
+
+## 5.1 Preparación
+
+La respuesta es el logaritmo del PM2.5 diario. Las predictoras son temperatura, humedad, viento, lluvia, radiación, NO2 y CO, con la estación y el mes como controles (Etapa 2: la asociación de la temperatura cambia de signo entre temporadas, por eso se controla la estacionalidad). Decisiones de transformación:
+
+- **Lluvia, NO2 y CO:** se usan en `log(1 + x)`: tienen cola derecha y muchos ceros (lluvia).
+- **Estandarización:** las predictoras se estandarizan con la media y desviación del **entrenamiento**, para que los coeficientes sean comparables entre variables (cambio en el PM2.5 por 1 desviación estándar).
+- **Partición temporal:** entrenamiento 2021–2023 y validación 2024–2025. No se parte al azar porque los días vecinos son dependientes y la partición aleatoria daría errores demasiado optimistas. Solo se validan las estaciones presentes en el entrenamiento (NO3 queda fuera).
+- **Casos completos:** todos los modelos se comparan sobre las mismas filas.
+
+```{r}
+#| label: prep-reg
+vars_x <- c("TOUT", "RH", "WSR", "lluvia", "SR", "lNO2", "lCO")
+fz <- paste0(vars_x, "_z")
+
+reg <- datos_dia |>
+  filter(estacion %in% est_c) |>
+  mutate(estacion = droplevels(estacion),
+         temporada = factor(temporada, c("invierno", "primavera", "verano", "otoño")),
+         lluvia = log1p(RAINF), lNO2 = log1p(NO2), lCO = log1p(CO),
+         y = log(PM25),
+         t = as.integer(dia - min(dia)) + 1L) |>
+  left_join(lim_norma |> select(anio, lim25 = PM25_24h), by = "anio") |>
+  mutate(crit = as.integer(PM25 > if (is.null(umbral_fijo)) lim25 else umbral_fijo)) |>
+  arrange(estacion, dia)
+
+reg_cc <- reg |> filter(if_all(all_of(c("y", vars_x)), \(x) !is.na(x)))
+
+reg |> filter(anio %in% c(anios_comunes, anios_prueba)) |>
+  group_by(estacion) |>
+  summarise(`Días` = n(), `Usables` = sum(!is.na(y) & if_all(all_of(vars_x), \(x) !is.na(x))), .groups = "drop") |>
+  mutate(`% usable` = Usables / Días * 100) |>
+  kable(digits = 1, caption = "Días usables (casos completos) por estación, 2021–2025")
+```
+
+```{r}
+#| label: split
+train <- reg_cc |> filter(anio %in% anios_comunes)
+test  <- reg_cc |> filter(anio %in% anios_prueba)
+
+mu  <- train |> summarise(across(all_of(vars_x), mean))
+sdv <- train |> summarise(across(all_of(vars_x), sd))
+estandariza <- \(d) { for (v in vars_x) d[[paste0(v, "_z")]] <- (d[[v]] - mu[[v]]) / sdv[[v]]; as.data.frame(d) }
+train <- estandariza(train); test <- estandariza(test)
+
+tibble(Conjunto = c("Entrenamiento 2021–2023", "Validación 2024–2025"),
+       Días = c(nrow(train), nrow(test)),
+       `% días críticos` = c(mean(train$crit), mean(test$crit)) * 100) |>
+  kable(digits = 1, format.args = list(big.mark = ","), caption = "Partición temporal")
+```
+
+## 5.2 Modelos comparados
+
+Se ajustan modelos anidados, todos con errores AR(1) por estación, para ver cuánto aporta cada bloque de variables:
+
+| Modelo | Contenido |
+|---|---|
+| M0 | Solo estación y mes (climatología) |
+| M1 | M0 + meteorología (temperatura, humedad, viento, lluvia, radiación) |
+| M2 | M1 + NO2 y CO |
+| M3 | M2 con la pendiente de la temperatura distinta en cada temporada |
+
+```{r}
+#| label: ajuste-reg
+ajusta <- function(f, d) gls(f, data = d, correlation = corAR1(form = ~ t | estacion), method = "ML")
+
+forms <- list(
+  M0 = y ~ estacion + mes_lab,
+  M1 = reformulate(c("estacion", "mes_lab", fz[1:5]), "y"),
+  M2 = reformulate(c("estacion", "mes_lab", fz), "y"),
+  M3 = reformulate(c("estacion", "mes_lab", setdiff(fz, "TOUT_z"), "TOUT_z:temporada"), "y")
+)
+modelos <- map(forms, \(f) ajusta(f, train))
+
+tibble(Modelo = names(modelos),
+       `Parámetros` = map_int(modelos, \(m) length(coef(m)) + 2L),
+       AIC = map_dbl(modelos, AIC), BIC = map_dbl(modelos, BIC),
+       `phi (AR1)` = map_dbl(modelos, \(m) as.numeric(coef(m$modelStruct$corStruct, unconstrained = FALSE)))) |>
+  kable(digits = 1, caption = "Ajuste en entrenamiento")
+```
+
+```{r}
+#| label: coef-m2
+tt <- summary(modelos$M2)$tTable
+coef_m2 <- as_tibble(tt[fz, , drop = FALSE], rownames = "Variable") |>
+  transmute(Variable = str_remove(Variable, "_z"),
+            `Coef. (log, por 1 DE)` = Value, EE = Std.Error, p = `p-value`,
+            `Cambio % por 1 DE` = 100 * (exp(Value) - 1),
+            `LI %` = 100 * (exp(Value - 1.96 * Std.Error) - 1),
+            `LS %` = 100 * (exp(Value + 1.96 * Std.Error) - 1))
+kable(coef_m2, digits = 3, caption = "M2: efecto de cada predictora sobre el PM2.5 diario (controlando estación y mes)")
+write_csv(coef_m2, "salidas/etapa3_coeficientes_m2.csv")
+```
+
+## 5.3 Supuestos de M2
+
+**Multicolinealidad.** Se calcula el factor de inflación de la varianza (VIF) con un modelo lineal ordinario con las mismas variables (Johnson & Wichern, 2007). Valores por debajo de 5 indican colinealidad moderada o menor. **Residuos.** Se revisan normalidad (QQ), varianza constante (residuos contra ajustados) y la autocorrelación restante.
+
+```{r}
+#| label: vif
+vif_m2 <- car::vif(lm(forms$M2, data = train))
+if (is.matrix(vif_m2)) vif_m2 <- vif_m2[, ncol(vif_m2)]^2 else vif_m2 <- vif_m2   # GVIF^(1/(2gl)) al cuadrado ~ VIF
+tibble(Variable = str_remove(fz, "_z"), VIF = as.numeric(vif_m2[fz])) |>
+  kable(digits = 2, caption = "VIF (controlando estación y mes)")
+```
+
+```{r}
+#| label: fig-supuestos-m2
+rd <- tibble(ajustado = as.numeric(fitted(modelos$M2)),
+             residuo = as.numeric(resid(modelos$M2, type = "normalized")),
+             estacion = train$estacion)
+p1 <- ggplot(rd, aes(sample = residuo)) + stat_qq(size = 0.4, alpha = 0.4) + stat_qq_line(colour = "firebrick") +
+  labs(title = "QQ de los residuos normalizados (M2)")
+p2 <- ggplot(rd, aes(ajustado, residuo)) + geom_point(size = 0.4, alpha = 0.3) +
+  geom_hline(yintercept = 0, colour = "firebrick") + labs(title = "Residuos vs ajustado (M2)", x = "log(PM2.5) ajustado")
+print(p1); print(p2)
+
+rd |> group_by(estacion) |> summarise(`r1 de los residuos` = lag1(residuo), `DE residual` = sd(residuo)) |>
+  kable(digits = 2, caption = "Autocorrelación de orden 1 y dispersión de los residuos por estación")
+```
+
+## 5.4 Validación en 2024–2025: errores
+
+Para cada modelo se predice la parte fija (estación, mes y predictoras) en el conjunto de validación y se calculan los errores en logaritmos y en µg/m³. Al retransformar se multiplica por el factor de corrección de Duan (promedio de $e^{\hat\varepsilon}$ en entrenamiento) para no subestimar la media. Se incluye un **bosque aleatorio** (Breiman, 2001) con las mismas variables como referencia no lineal y para comparar la importancia de las variables.
+
+```{r}
+#| label: validacion
+metricas <- function(y, yhat, smear) {
+  tibble(RMSE_log = sqrt(mean((y - yhat)^2)), MAE_log = mean(abs(y - yhat)),
+         R2_log = 1 - sum((y - yhat)^2) / sum((y - mean(y))^2),
+         RMSE = sqrt(mean((exp(y) - exp(yhat) * smear)^2)),
+         MAE = mean(abs(exp(y) - exp(yhat) * smear)))
+}
+
+# bosque aleatorio
+set.seed(2026)
+rf <- ranger(y ~ estacion + mes_lab + TOUT + RH + WSR + lluvia + SR + lNO2 + lCO,
+             data = train, num.trees = 300, importance = "permutation", min.node.size = 10)
+
+preds <- c(map(modelos, \(m) as.numeric(predict(m, newdata = test))),
+           RF = list(predict(rf, test)$predictions))
+smear <- c(map_dbl(modelos, \(m) mean(exp(resid(m, type = "response")))),
+           RF = mean(exp(train$y - rf$predictions)))
+
+val <- imap_dfr(preds, \(p, nm) bind_cols(Modelo = nm, metricas(test$y, p, smear[[nm]])))
+kable(val, digits = 3, caption = "Errores en validación (2024–2025). Columnas *_log en logaritmos; RMSE y MAE en µg/m³")
+write_csv(val, "salidas/etapa3_validacion_modelos.csv")
+```
+
+```{r}
+#| label: validacion-anio-est
+# por año de validación (cambios de equipo en 2025) y por estación, para M2
+por_anio <- map_dfr(sort(unique(test$anio)), \(a) {
+  i <- test$anio == a
+  bind_cols(Año = a, n = sum(i), metricas(test$y[i], preds$M2[i], smear[["M2"]]))
+})
+kable(por_anio, digits = 3, caption = "M2: errores por año de validación")
+
+por_est <- map_dfr(levels(test$estacion), \(e) {
+  i <- test$estacion == e
+  if (sum(i) < 30) return(NULL)
+  bind_cols(Estación = e, n = sum(i), metricas(test$y[i], preds$M2[i], smear[["M2"]]))
+})
+kable(por_est, digits = 3, caption = "M2: errores por estación (estaciones con al menos 30 días de validación)")
+```
+
+```{r}
+#| label: fig-obs-pred
+tibble(obs = exp(test$y), pred = exp(preds$M2) * smear[["M2"]], anio = factor(test$anio)) |>
+  ggplot(aes(pred, obs, colour = anio)) +
+  geom_point(size = 0.5, alpha = 0.4) + geom_abline(colour = "black", linetype = "dashed") +
+  scale_x_log10() + scale_y_log10() +
+  labs(x = "PM2.5 predicho (µg/m³)", y = "PM2.5 observado (µg/m³)", colour = "Año",
+       title = "M2 en validación: observado vs predicho (escala log)")
+```
+
+## 5.5 Importancia de las variables
+
+Se combinan tres miradas: (1) el coeficiente estandarizado de M2 (tabla anterior); (2) cuánto **empeora el error de validación** al quitar cada variable de M2 (ΔRMSE en logaritmos); y (3) la importancia por permutación del bosque aleatorio (aumento del error al permutar la variable). Si las tres coinciden, la conclusión es robusta al tipo de modelo.
+
+```{r}
+#| label: importancia
+rmse_log <- \(p) sqrt(mean((test$y - p)^2))
+base_rmse <- rmse_log(preds$M2)
+
+drop1_tab <- map_dfr(fz, \(v) {
+  m <- ajusta(reformulate(c("estacion", "mes_lab", setdiff(fz, v)), "y"), train)
+  tibble(Variable = str_remove(v, "_z"), `ΔRMSE_log al quitarla` = rmse_log(as.numeric(predict(m, newdata = test))) - base_rmse)
+})
+
+imp_rf <- tibble(Variable = names(rf$variable.importance), `Importancia RF` = as.numeric(rf$variable.importance))
+
+imp <- drop1_tab |> left_join(imp_rf, by = "Variable") |>
+  left_join(coef_m2 |> transmute(Variable, `Cambio % por 1 DE`), by = "Variable") |>
+  arrange(desc(`ΔRMSE_log al quitarla`))
+kable(imp, digits = 4, caption = "Importancia de las predictoras")
+kable(imp_rf |> filter(Variable %in% c("estacion", "mes_lab")) |> arrange(desc(`Importancia RF`)), digits = 4,
+      caption = "Importancia por permutación de los controles (bosque aleatorio)")
+write_csv(imp, "salidas/etapa3_importancia_variables.csv")
+```
+
+## 5.6 Sensibilidad a la imputación
+
+En la Etapa 2 se vio que la imputación de PM2.5 no es homogénea entre estaciones (por ejemplo, 30 % en NO y 25 % en SUR en el periodo común). Se vuelve a ajustar M2 excluyendo los estación-días con más de 50 % de las horas de PM2.5 imputadas y se comparan los coeficientes. Si no cambian de forma importante, las conclusiones no dependen de la imputación.
+
+```{r}
+#| label: sens-imputacion
+if ("imp_PM25" %in% names(datos_e2)) {
+  f_imp <- datos_e2 |> mutate(dia = as.Date(fecha)) |>
+    group_by(estacion, dia) |> summarise(f_imp = mean(as.numeric(imp_PM25)), .groups = "drop")
+  train_s <- train |> left_join(f_imp, by = c("estacion", "dia")) |> filter(f_imp <= 0.5) |> arrange(estacion, dia)
+  m2_s <- ajusta(forms$M2, train_s)
+  tt_s <- summary(m2_s)$tTable
+  tibble(Variable = str_remove(fz, "_z"),
+         `Cambio % (todos)` = coef_m2$`Cambio % por 1 DE`,
+         `Cambio % (sin >50 % imputado)` = 100 * (exp(tt_s[fz, "Value"]) - 1)) |>
+    kable(digits = 2, caption = sprintf("Sensibilidad a la imputación (%s de %s días excluidos)",
+                                        comma(nrow(train) - nrow(train_s)), comma(nrow(train))))
+} else cat("La base horaria no tiene la columna imp_PM25; se omite esta sección.\n")
+```
+
+# 6. Dependencia: probabilidad de un día crítico (regresión logística con GEE)
+
+## 6.1 Modelo
+
+Un **día crítico** es un día con PM2.5 promedio de 24 h por encima de la norma vigente ese año (o del umbral fijo `umbral_fijo` si se definió). Son pocos (Etapa 2: 0.7 a 15.8 % por estación), por lo que la regresión logística es preferible al análisis discriminante. Como los días consecutivos están correlacionados, un error AR(1) gaussiano no aplica a una respuesta binaria; se usan ecuaciones de estimación generalizadas con correlación AR(1) dentro de cada estación (Liang & Zeger, 1986; Højsgaard et al., 2006), cuyos errores estándar robustos son válidos aunque la estructura de correlación no sea exacta.
+
+Como control estacional se usa la **temporada** (4 niveles) y no el mes: en julio y agosto no hubo ningún día crítico (Etapa 2, Tabla A10), así que un efecto fijo por mes produciría separación perfecta y coeficientes infinitos.
+
+```{r}
+#| label: gee
+f_gee  <- reformulate(c("estacion", "temporada", fz), "crit")
+f_base <- reformulate(c("estacion", "temporada"), "crit")
+
+tr <- train |> arrange(estacion, t)
+gee   <- geeglm(f_gee,  id = estacion, waves = t, data = tr, family = binomial, corstr = "ar1")
+gee_b <- geeglm(f_base, id = estacion, waves = t, data = tr, family = binomial, corstr = "ar1")
+
+cs <- summary(gee)$coefficients
+or_tab <- tibble(Variable = str_remove(fz, "_z"),
+                 OR = exp(cs[fz, "Estimate"]),
+                 LI = exp(cs[fz, "Estimate"] - 1.96 * cs[fz, "Std.err"]),
+                 LS = exp(cs[fz, "Estimate"] + 1.96 * cs[fz, "Std.err"]),
+                 p = cs[fz, "Pr(>|W|)"])
+kable(or_tab, digits = 3, caption = "Razones de momios por 1 DE (IC 95 % robusto), controlando estación y temporada")
+write_csv(or_tab, "salidas/etapa3_odds_ratios.csv")
+
+cat("Correlación AR(1) estimada (alfa):", round(gee$geese$alpha, 3), "\n")
+```
+
+## 6.2 Validación
+
+Se evalúa en 2024–2025 el área bajo la curva ROC (AUC; pROC, Robin et al., 2011), el puntaje de Brier, y la sensibilidad y especificidad con el umbral de probabilidad que maximiza el índice de Youden **en entrenamiento**. Se compara contra un modelo base con solo estación y temporada para ver cuánto aportan la meteorología y los otros contaminantes. Como la norma se vuelve más estricta en 2024–2025 (33 µg/m³), la tasa de días críticos cambia entre entrenamiento y validación; por eso el AUC (que no depende de la tasa base) es la métrica principal, y la calibración se revisa aparte.
+
+```{r}
+#| label: gee-validacion
+p_tr <- predict(gee, tr, type = "response")
+p_te <- predict(gee, test, type = "response")
+p_te_b <- predict(gee_b, test, type = "response")
+
+roc_tr <- roc(tr$crit, p_tr, quiet = TRUE, direction = "<")
+thr <- coords(roc_tr, "best", best.method = "youden", ret = "threshold", transpose = FALSE)[["threshold"]][1]
+
+if (length(unique(test$crit)) == 2) {
+  roc_te <- roc(test$crit, p_te, quiet = TRUE, direction = "<")
+  roc_b  <- roc(test$crit, p_te_b, quiet = TRUE, direction = "<")
+  pred_c <- as.integer(p_te >= thr)
+  tp <- sum(pred_c == 1 & test$crit == 1); fn <- sum(pred_c == 0 & test$crit == 1)
+  tn <- sum(pred_c == 0 & test$crit == 0); fp <- sum(pred_c == 1 & test$crit == 0)
+  tibble(Métrica = c("AUC modelo completo", "AUC modelo base (estación + temporada)",
+                     "Brier", "Umbral de probabilidad (Youden, entrenamiento)",
+                     "Sensibilidad", "Especificidad", "Precisión (valor predictivo positivo)"),
+         Valor = c(as.numeric(auc(roc_te)), as.numeric(auc(roc_b)), mean((p_te - test$crit)^2), thr,
+                   tp / (tp + fn), tn / (tn + fp), tp / (tp + fp))) |>
+    kable(digits = 3, caption = "Validación de la regresión logística (2024–2025)") |> print()
+  kable(matrix(c(tn, fn, fp, tp), 2, dimnames = list(Observado = c("No crítico", "Crítico"),
+                                                      Predicho = c("No crítico", "Crítico")), byrow = FALSE),
+        caption = "Matriz de confusión en validación") |> print()
+} else cat("El conjunto de validación no tiene ambas clases; revisar umbral_fijo.\n")
+```
+
+```{r}
+#| label: fig-calibracion
+tibble(p = p_te, crit = test$crit) |>
+  mutate(decil = ntile(p, 10)) |>
+  group_by(decil) |> summarise(`Probabilidad predicha` = mean(p), `Frecuencia observada` = mean(crit)) |>
+  ggplot(aes(`Probabilidad predicha`, `Frecuencia observada`)) +
+  geom_abline(linetype = "dashed") + geom_point(size = 2) + geom_line() +
+  labs(title = "Calibración en validación (por deciles)")
+```
+
+## 6.3 Importancia de las variables en la logística
+
+Se mide cuánto cae el AUC de validación al quitar cada predictora del modelo.
+
+```{r}
+#| label: gee-importancia
+if (exists("roc_te")) {
+  auc_full <- as.numeric(auc(roc_te))
+  imp_gee <- map_dfr(fz, \(v) {
+    f <- reformulate(c("estacion", "temporada", setdiff(fz, v)), "crit")
+    m <- geeglm(f, id = estacion, waves = t, data = tr, family = binomial, corstr = "ar1")
+    tibble(Variable = str_remove(v, "_z"),
+           `ΔAUC al quitarla` = as.numeric(auc(roc(test$crit, predict(m, test, type = "response"),
+                                                  quiet = TRUE, direction = "<"))) - auc_full)
+  }) |> left_join(or_tab |> select(Variable, OR), by = "Variable") |> arrange(`ΔAUC al quitarla`)
+  print(kable(imp_gee, digits = 4, caption = "Cambio del AUC de validación al quitar cada predictora (más negativo = más importante)"))
+  write_csv(imp_gee, "salidas/etapa3_importancia_logistica.csv")
+}
+```
+
+# 7. Guardar los modelos
+
+Se guardan los objetos necesarios para la interfaz gráfica de la siguiente fase (modelos, parámetros de estandarización y catálogo de estaciones).
+
+```{r}
+#| label: guardar
+saveRDS(list(m2 = modelos$M2, rf = rf, gee = gee, mu = mu, sdv = sdv, vars_x = vars_x,
+             smear_m2 = smear[["M2"]], umbral_prob = thr, est_c = est_c,
+             pca = pca, grupos = grupo_est, cat_est = cat_est),
+        "salidas/etapa3_modelos.rds")
+sessionInfo()
+```
+
+# 8. Actualización del objetivo (se completa con los resultados)
+
+Cuando se tengan los resultados, aquí se reescribe el objetivo con lo que los datos permitieron responder (por ejemplo: número de grupos de exposición estables, qué parte de la variación diaria explica la meteorología, qué variables predicen los días críticos y con qué error). Este texto se redacta en conjunto después de revisar las tablas.
+
+# Referencias
+
+Breiman, L. (2001). Random forests. *Machine Learning, 45*(1), 5–32. https://doi.org/10.1023/A:1010933404324
+
+Hair, J. F., Black, W. C., Babin, B. J., & Anderson, R. E. (2019). *Multivariate data analysis* (8.ª ed.). Cengage.
+
+Hennig, C. (2007). Cluster-wise assessment of cluster stability. *Computational Statistics & Data Analysis, 52*(1), 258–271. https://doi.org/10.1016/j.csda.2006.11.025
+
+Højsgaard, S., Halekoh, U., & Yan, J. (2006). The R package geepack for generalized estimating equations. *Journal of Statistical Software, 15*(2), 1–11. https://doi.org/10.18637/jss.v015.i02
+
+Jackson, D. A. (1993). Stopping rules in principal components analysis: A comparison of heuristical and statistical approaches. *Ecology, 74*(8), 2204–2214. https://doi.org/10.2307/1939574
+
+Johnson, R. A., & Wichern, D. W. (2007). *Applied multivariate statistical analysis* (6.ª ed.). Pearson Prentice Hall.
+
+Künsch, H. R. (1989). The jackknife and the bootstrap for general stationary observations. *The Annals of Statistics, 17*(3), 1217–1241. https://doi.org/10.1214/aos/1176347265
+
+Liang, K.-Y., & Zeger, S. L. (1986). Longitudinal data analysis using generalized linear models. *Biometrika, 73*(1), 13–22. https://doi.org/10.1093/biomet/73.1.13
+
+Pinheiro, J. C., & Bates, D. M. (2000). *Mixed-effects models in S and S-PLUS*. Springer. https://doi.org/10.1007/b98882
+
+Robin, X., Turck, N., Hainard, A., Tiberti, N., Lisacek, F., Sanchez, J.-C., & Müller, M. (2011). pROC: An open-source package for R and S+ to analyze and compare ROC curves. *BMC Bioinformatics, 12*, Artículo 77. https://doi.org/10.1186/1471-2105-12-77
+
+Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. *Journal of Computational and Applied Mathematics, 20*, 53–65. https://doi.org/10.1016/0377-0427(87)90125-7
+
+Secretaría de Salud. (2021, octubre). *NOM-025-SSA1-2021, Salud ambiental. Criterio para evaluar la calidad del aire ambiente, con respecto a las partículas suspendidas PM10 y PM2.5* (Norma Oficial Mexicana). Diario Oficial de la Federación.
+
+Ward, J. H. (1963). Hierarchical grouping to optimize an objective function. *Journal of the American Statistical Association, 58*(301), 236–244. https://doi.org/10.1080/01621459.1963.10500845
+
+World Health Organization. (2021). *WHO global air quality guidelines* (WHO/HEP/ECH/AQG/2021.1). World Health Organization.
