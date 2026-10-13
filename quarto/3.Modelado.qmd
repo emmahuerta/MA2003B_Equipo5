@@ -27,6 +27,7 @@ Esta etapa responde con dos familias de técnicas (Johnson & Wichern, 2007; Hair
 | Dependencia | Modelo lineal con errores AR(1) + bootstrap por bloques (estación y mes) | 1, 2 y 3 |
 | Dependencia | Regresión lineal múltiple con errores AR(1) (más un bosque aleatorio como referencia) | 4 |
 | Dependencia | Regresión logística con ecuaciones de estimación generalizadas (GEE) con correlación AR(1) | 4 |
+| Dependencia | GAM Gamma con errores AR(1), con el enfoque de AirGAM (Walker et al., 2023) | 2, 4 y 5 |
 
 ## 0.1 Paquetes y parámetros
 
@@ -35,7 +36,7 @@ Se instalan solo los paquetes que falten. Los parámetros están juntos para pod
 ```{r}
 #| label: paquetes
 paquetes <- c("tidyverse", "lubridate", "scales", "knitr", "nlme", "emmeans",
-              "car", "geepack", "pROC", "ranger", "cluster")
+              "car", "geepack", "pROC", "ranger", "cluster", "mgcv")
 faltan <- setdiff(paquetes, rownames(installed.packages()))
 if (length(faltan) > 0) install.packages(faltan)
 
@@ -49,6 +50,7 @@ library(geepack)
 library(pROC)
 library(ranger)
 library(cluster)
+library(mgcv)
 
 theme_set(theme_minimal(base_size = 11))
 options(knitr.kable.NA = "")
@@ -73,7 +75,7 @@ B_boot <- 500                # repeticiones para el PCA/conglomerados y para el 
 # ---- Día crítico -------------------------------------------------------------
 # NULL = norma NOM-025-SSA1 vigente cada año (como en la Etapa 2);
 # un número (p. ej. 41) = umbral fijo para todos los años (prueba de sensibilidad)
-umbral_fijo <- NULL
+umbral_fijo <- 33
 
 # ---- Límites de referencia (µg/m³) -------------------------------------------
 # NOM-025-SSA1-2014 (2020-2021) y NOM-025-SSA1-2021 con cumplimiento gradual (2022-2025);
@@ -414,15 +416,44 @@ rep_tab <- perfil_anio |> select(estacion, anio) |>
 
 rep_tab |>
   filter(!is.na(grupo_orig)) |>
-  group_by(Periodo = if_else(anio %in% anios_comunes, "2021–2023", "2024–2025")) |>
+  group_by(Año = anio) |>
   summarise(`Estación-años` = n(), `% que conserva su grupo` = mean(coincide) * 100) |>
-  kable(digits = 1, caption = "Replicación de los grupos con perfiles anuales")
+  kable(digits = 1, caption = "Replicación de los grupos con perfiles anuales, por año (2020 solo como contexto)")
 
 rep_tab |> mutate(grupo_anio = as.character(grupo_anio)) |>
   select(estacion, anio, grupo_anio) |>
   pivot_wider(names_from = anio, values_from = grupo_anio) |>
   left_join(grupo_est |> select(estacion, `grupo original` = grupo), by = "estacion") |>
   kable(caption = "Grupo asignado por estación y año (vacío: sin año válido; NO3 no estaba en el periodo común)")
+```
+
+## 3.7 ¿Qué cambió en 2024–2025? Diagnóstico por variable
+
+En 3.6 casi todas las estaciones pasan al grupo 1 en 2025. Para saber si es un cambio de PM (posible efecto de los equipos nuevos de PM2.5 y de las bombas de los BAM de PM10 de 2025, según el socio formador) o también de meteorología y de otros contaminantes, se compara el promedio anual de cada estación con su promedio de 2021–2023. Si PM2.5 y PM10 bajan pero la temperatura, el viento, el NO2 y el CO no cambian, el cambio es específico del PM. Solo se usan estación-años con al menos 300 días.
+
+```{r}
+#| label: cambio-2025
+vv <- c("PM25", "PM10", "TOUT", "WSR", "NO2", "CO")
+anual <- datos_dia |>
+  filter(estacion %in% est_c) |>
+  group_by(estacion, anio) |>
+  summarise(n = n(), across(all_of(vv), \(x) mean(x, na.rm = TRUE)), .groups = "drop") |>
+  filter(n >= 300)
+ref <- anual |> filter(anio %in% anios_comunes) |>
+  group_by(estacion) |> summarise(across(all_of(vv), mean), .groups = "drop")
+
+cambio <- anual |> left_join(ref, by = "estacion", suffix = c("", "_ref")) |>
+  transmute(estacion, anio,
+            `PM2.5 (%)` = 100 * (PM25 / PM25_ref - 1), `PM10 (%)` = 100 * (PM10 / PM10_ref - 1),
+            `NO2 (%)` = 100 * (NO2 / NO2_ref - 1), `CO (%)` = 100 * (CO / CO_ref - 1),
+            `Viento (%)` = 100 * (WSR / WSR_ref - 1), `Temperatura (°C)` = TOUT - TOUT_ref)
+
+cambio |> group_by(Año = anio) |>
+  summarise(Estaciones = n(), across(where(is.numeric) & !any_of(c("anio", "Estaciones")), median), .groups = "drop") |>
+  kable(digits = 1, caption = "Mediana entre estaciones del cambio respecto a su promedio 2021–2023")
+
+cambio |> filter(anio == 2025) |> select(-anio) |>
+  kable(digits = 1, caption = "2025: cambio por estación respecto a su promedio 2021–2023")
 ```
 
 # 4. Dependencia: nivel por estación y mes con errores AR(1) y bootstrap por bloques
@@ -693,6 +724,13 @@ coef_m2 <- as_tibble(tt[fz, , drop = FALSE], rownames = "Variable") |>
             `LS %` = 100 * (exp(Value + 1.96 * Std.Error) - 1))
 kable(coef_m2, digits = 3, caption = "M2: efecto de cada predictora sobre el PM2.5 diario (controlando estación y mes)")
 write_csv(coef_m2, "salidas/etapa3_coeficientes_m2.csv")
+
+# mismas predictoras meteorológicas sin NO2 y CO (M1) para ver cuánto absorben NO2 y CO
+tt1 <- summary(modelos$M1)$tTable
+tibble(Variable = str_remove(fz[1:5], "_z"),
+       `Cambio % en M1 (sin NO2 ni CO)` = 100 * (exp(tt1[fz[1:5], "Value"]) - 1),
+       `Cambio % en M2 (con NO2 y CO)` = coef_m2$`Cambio % por 1 DE`[1:5]) |>
+  kable(digits = 1, caption = "Efecto de la meteorología con y sin NO2 y CO en el modelo")
 ```
 
 ## 5.3 Supuestos de M2
@@ -822,9 +860,269 @@ if ("imp_PM25" %in% names(datos_e2)) {
 } else cat("La base horaria no tiene la columna imp_PM25; se omite esta sección.\n")
 ```
 
-# 6. Dependencia: probabilidad de un día crítico (regresión logística con GEE)
+# 6. Dependencia no lineal: modelo aditivo generalizado (GAM) con el enfoque de AirGAM
 
-## 6.1 Modelo
+## 6.1 Por qué no basta con el modelo lineal con errores AR(1)
+
+Los modelos de las secciones 4 y 5 resuelven la **dependencia temporal** (el AR(1) quita la autocorrelación de los residuos), pero suponen que cada variable meteorológica tiene un efecto **lineal** sobre el log PM2.5 y que la estacionalidad es un escalón por mes. En la Etapa 2 se vio que eso no se cumple: el PM2.5 baja rápido cuando el viento pasa de calma a unos 8 km/h y después casi no cambia, la relación con la temperatura no es monótona (Figura B11) y su signo cambia entre temporadas (−0.03 en el año, +0.37 en invierno). El modelo M3 solo parcha el caso de la temperatura. Además, en la validación el bosque aleatorio superó a todos los modelos lineales (sección 5.4), lo que indica no linealidad que la regresión lineal no captura. Un GAM estima cada relación como una **función suave** de la variable, penalizada para no sobreajustar, sin fijar su forma de antemano (Wood, 2017).
+
+Se sigue el diseño de **AirGAM 2022r1** (Walker et al., 2023), aplicado a PM2.5 en Delhi por Chetna et al. (2024):
+
+- **Respuesta y distribución:** PM2.5 diario con distribución Gamma y enlace log, porque su varianza crece con la media (en lugar de transformar la respuesta).
+- **Términos suaves** para temperatura, humedad, viento, lluvia y radiación (y dirección del viento con base **cíclica** si está disponible; en la Etapa 2 se excluyó por ser circular, y la base cíclica es justo el tratamiento que requería).
+- **Calendario:** día del año con base cíclica y día de la semana. La estación entra como efecto fijo (AirGAM ajusta una estación a la vez; aquí se ajusta un modelo conjunto para compararlo con M0–M2).
+- **Autocorrelación:** errores AR(1) con `mgcv::bam` (`rho`), que aplica el AR(1) a los residuos de trabajo del ajuste. Si esa combinación no está disponible con la familia Gamma en la versión instalada, el código lo reintenta sin `discrete` y, como último recurso, ajusta sin AR(1) y lo indica en la tabla de 6.3.
+- **Selección automática** (`select = TRUE`): los términos que no aportan se encogen hacia cero, como en AirGAM.
+- **Sin otros contaminantes en el modelo base:** AirGAM explica el PM solo con meteorología y calendario (G1). G2 añade NO2 y CO para compararlo con M2 y responder el objetivo 4.
+
+No se incluye el término de tendencia `s(años)` de AirGAM: con tres años de entrenamiento no se puede estimar una tendencia suave y no se puede extrapolar a 2024–2025. En su lugar se usa la idea central de AirGAM, el **ajuste por meteorología**, para responder si las diferencias entre estaciones se deben al clima local o a fuentes (sección 6.5).
+
+| Modelo | Contenido | Análogo lineal |
+|---|---|---|
+| G0 | Estación + día del año + día de la semana | M0 |
+| G1 | G0 + suaves de meteorología (AirGAM) | M1 |
+| G2 | G1 + suaves de NO2 y CO | M2 |
+
+## 6.2 Preparación
+
+Se usan los mismos conjuntos de entrenamiento (2021–2023) y validación (2024–2025) de la sección 5, en las variables originales (sin estandarizar; el GAM no lo necesita). Se marca dónde empieza cada tramo de días consecutivos de una estación, para que el AR(1) no conecte días separados por un hueco. La dirección del viento solo se incluye si la base horaria tiene la columna (`WDR`, `WD` o `WDIR`); la base de la Etapa 2 conserva solo las variables del análisis, así que en caso contrario el modelo corre sin ella.
+
+```{r}
+#| label: gam-prep
+# Variables de calendario al estilo AirGAM (Walker et al., 2023, Tabla 1)
+prep_gam <- function(d) {
+  d |>
+    mutate(fila = row_number()) |>          # para comparar con los modelos lineales en las mismas filas
+    arrange(estacion, dia) |>
+    mutate(doy = yday(dia),
+           dow = factor(wday(dia, week_start = 1), levels = 1:7,
+                        labels = c("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")),
+           # TRUE donde empieza un tramo de días consecutivos (nueva estación o después de un hueco)
+           AR_start = estacion != lag(estacion, default = first(estacion)) |
+                      as.integer(dia - lag(dia, default = first(dia))) != 1L)
+}
+
+# Dirección del viento (opcional): promedio vectorial diario a partir de la base horaria
+col_wd <- intersect(c("WDR", "WD", "WDIR"), names(datos_e2))[1]
+usa_wd <- !is.na(col_wd) && "WSR" %in% names(datos_e2)
+if (usa_wd) {
+  wd_dia <- datos_e2 |>
+    filter(!is.na(.data[[col_wd]]), !is.na(WSR)) |>
+    mutate(dia = as.Date(format(fecha, "%Y-%m-%d")), th = .data[[col_wd]] * pi / 180) |>
+    group_by(estacion, dia) |>
+    summarise(u = mean(WSR * sin(th)), v = mean(WSR * cos(th)), n_wd = n(), .groups = "drop") |>
+    filter(n_wd >= 18) |>
+    transmute(estacion = factor(as.character(estacion), levels = levels(train$estacion)),
+              dia, WD = (atan2(u, v) * 180 / pi) %% 360)
+  agrega_wd <- \(d) d |> left_join(wd_dia, by = c("estacion", "dia")) |> filter(!is.na(WD))
+} else agrega_wd <- identity
+
+train_g <- train |> prep_gam() |> agrega_wd() |> as.data.frame()
+test_g  <- test  |> prep_gam() |> agrega_wd() |> as.data.frame()
+# después de filtrar por WD los huecos cambian: se recalcula el inicio de cada tramo
+fix_ar <- \(d) d |> mutate(AR_start = estacion != lag(estacion, default = first(estacion)) |
+                             as.integer(dia - lag(dia, default = first(dia))) != 1L) |> as.data.frame()
+train_g <- fix_ar(train_g); test_g <- fix_ar(test_g)
+
+tibble(Conjunto = c("Entrenamiento 2021–2023", "Validación 2024–2025"),
+       `Días` = c(nrow(train_g), nrow(test_g)),
+       `Tramos AR(1)` = c(sum(train_g$AR_start), sum(test_g$AR_start)),
+       `Dirección del viento` = if (usa_wd) "incluida" else "no disponible") |>
+  kable(format.args = list(big.mark = ","), caption = "Datos para el GAM")
+```
+
+## 6.3 Ajuste
+
+El parámetro `rho` se estima con la autocorrelación de orden 1 de los residuos del modelo sin AR(1), usando solo pares de días consecutivos de la misma estación, y se reajusta el modelo con ese valor (el procedimiento de AirGAM).
+
+```{r}
+#| label: gam-ajuste
+# extremos de las bases cíclicas (la dirección del viento solo si está disponible)
+nudos  <- if (usa_wd) list(doy = c(0.5, 366.5), WD = c(0, 360)) else list(doy = c(0.5, 366.5))
+base_g <- c("estacion", "dow", "s(doy, bs = 'cc', k = 20)")
+s_met  <- c("s(TOUT)", "s(RH)", "s(WSR)", "s(lluvia, k = 5)", "s(SR)", if (usa_wd) "s(WD, bs = 'cc', k = 8)")
+s_cont <- c("s(lNO2)", "s(lCO)")
+
+forms_gam <- list(
+  G0 = reformulate(base_g, "PM25"),                      # solo calendario (tendencia "sin ajustar")
+  G1 = reformulate(c(base_g, s_met), "PM25"),            # AirGAM: calendario + meteorología
+  G2 = reformulate(c(base_g, s_met, s_cont), "PM25")     # G1 + NO2 y CO (comparable con M2)
+)
+
+ajusta_gam <- function(f, d) {
+  base_args <- list(formula = f, data = d, family = Gamma(link = "log"),
+                    method = "fREML", select = TRUE, knots = nudos)
+  ajusta <- \(extra) do.call(bam, c(base_args, extra))
+
+  # 1) ajuste sin AR(1) para estimar rho
+  m0 <- tryCatch(ajusta(list(discrete = TRUE)), error = \(e) ajusta(list()))
+  r <- residuals(m0, type = "pearson"); i <- which(!d$AR_start)
+  rho <- cor(r[i], r[i - 1])      # solo pares de días consecutivos de la misma estación
+
+  # 2) ajuste con AR(1): primero con discrete = TRUE, luego sin discrete, y como último recurso sin AR(1)
+  intentos <- list(list(discrete = TRUE, rho = rho, AR.start = d$AR_start),
+                   list(rho = rho, AR.start = d$AR_start))
+  m1 <- NULL
+  for (ex in intentos) { m1 <- tryCatch(ajusta(ex), error = \(e) NULL); if (!is.null(m1)) break }
+  if (is.null(m1)) {
+    message("AR(1) no disponible con esta familia/versión: se usa el modelo sin AR(1).")
+    m1 <- m0; modo <- "sin AR(1)"
+  } else modo <- "AR(1)"
+
+  m1$rho_ar1 <- rho
+  m1$modo <- modo
+  m1$r1_sin_ar <- tapply(r, d$estacion, lag1)
+  m1
+}
+gam_mods <- map(forms_gam, \(f) ajusta_gam(f, train_g))
+
+imap_dfr(gam_mods, \(m, nm) tibble(
+  Modelo = nm, `R² ajustado` = summary(m)$r.sq, `Devianza explicada (%)` = 100 * summary(m)$dev.expl,
+  `gl efectivos` = sum(m$edf), `rho estimado` = m$rho_ar1, `Errores` = m$modo)) |>
+  kable(digits = 3, caption = "GAM (Gamma, enlace log) en entrenamiento 2021–2023")
+```
+
+La tabla de términos suaves se lee como en Chetna et al. (2024): el estadístico F ordena la importancia de cada variable y los grados de libertad efectivos (edf) indican qué tan no lineal es la relación (edf ≈ 1: casi lineal).
+
+```{r}
+#| label: gam-suavizados
+st <- summary(gam_mods$G2)$s.table
+tibble(Término = rownames(st), edf = st[, "edf"], F = st[, "F"], p = st[, "p-value"]) |>
+  arrange(desc(F)) |>
+  kable(digits = 3, caption = "G2: significancia aproximada de los términos suaves (edf ≈ 1: relación casi lineal; edf ≈ 0: el término se eliminó con select = TRUE)")
+```
+
+Las funciones estimadas se muestran como **factor multiplicativo** sobre el PM2.5 (1 = sin efecto), con su banda de confianza al 95 %. Si se ven curvas y no rectas, el modelo lineal de la sección 5 estaba omitiendo forma.
+
+```{r}
+#| label: fig-gam-efectos
+#| fig-height: 8
+plot(gam_mods$G2, pages = 1, shade = TRUE, seWithMean = TRUE, scale = 0, trans = exp,
+     ylab = "Factor sobre el PM2.5")
+```
+
+## 6.4 Diagnóstico y validación
+
+Se revisa (i) si la dimensión de las bases alcanza (`k.check`), (ii) la **concurvidad**, el análogo no lineal de la colinealidad (Walker et al., 2023 encontraron valores casi siempre menores a 0.4), y (iii) que el AR(1) elimine la autocorrelación de los residuos.
+
+```{r}
+#| label: gam-diagnostico
+# (i) ¿alcanzan las bases? k-index < 1 con p pequeño sugiere subir k
+k.check(gam_mods$G2) |> as.data.frame() |> rownames_to_column("Término") |>
+  kable(digits = 3, caption = "G2: revisión de la dimensión de las bases (k)")
+
+# (ii) concurvidad (análogo no lineal de la colinealidad); Walker et al. (2023) reportan casi todo < 0.4
+cc <- concurvity(gam_mods$G2, full = TRUE)
+tibble(Término = colnames(cc), Concurvidad = cc["estimate", ]) |> filter(Término != "para") |>
+  kable(digits = 3, caption = "G2: concurvidad (estimate) de cada término con el resto del modelo")
+
+# (iii) autocorrelación de los residuos antes y después del AR(1)
+res_std <- if (!is.null(gam_mods$G2$std.rsd)) gam_mods$G2$std.rsd else residuals(gam_mods$G2, type = "pearson")
+tibble(estacion = names(gam_mods$G2$r1_sin_ar),
+       `r1 sin AR(1)` = as.numeric(gam_mods$G2$r1_sin_ar),
+       `r1 con AR(1)` = as.numeric(tapply(res_std, train_g$estacion, lag1))) |>
+  kable(digits = 2, caption = "G2: autocorrelación de orden 1 de los residuos por estación")
+```
+
+La validación usa las métricas de AirGAM (Walker et al., 2023; calculadas como en `openair::modStats`): FAC2 (fracción de días con predicción entre la mitad y el doble de lo observado), sesgo medio (MB), RMSE, MAE, correlación r y coeficiente de eficiencia (COE). Todas se calculan en µg/m³ y sobre las mismas filas para los modelos lineales (con la corrección de Duan), el bosque aleatorio y los GAM. Como el GAM Gamma predice directamente la media, no necesita corrección al retransformar.
+
+```{r}
+#| label: gam-validacion
+# Métricas de evaluación de AirGAM (openair::modStats): FAC2, MB, RMSE, r y COE, en µg/m³
+metricas_air <- function(o, p) tibble(
+  FAC2 = mean(p / o >= 0.5 & p / o <= 2), MB = mean(p - o), RMSE = sqrt(mean((p - o)^2)),
+  MAE = mean(abs(p - o)), r = cor(o, p), COE = 1 - sum(abs(p - o)) / sum(abs(o - mean(o))))
+
+obs <- test_g$PM25
+pred_lin <- map(c(M0 = "M0", M1 = "M1", M2 = "M2", RF = "RF"),
+                \(nm) exp(preds[[nm]][test_g$fila]) * smear[[nm]])
+pred_gam <- map(gam_mods, \(m) as.numeric(predict(m, newdata = test_g, type = "response")))
+
+val_gam <- imap_dfr(c(pred_lin, pred_gam), \(p, nm) bind_cols(Modelo = nm, metricas_air(obs, p))) |>
+  mutate(Tipo = case_when(Modelo %in% c("M0", "G0") ~ "Solo estación y calendario",
+                          Modelo %in% c("M1", "G1") ~ "+ meteorología",
+                          Modelo %in% c("M2", "G2") ~ "+ meteorología, NO2 y CO",
+                          TRUE ~ "Bosque aleatorio (todas)"), .after = Modelo)
+kable(val_gam, digits = 3, caption = "Validación 2024–2025: modelos lineales con AR(1) (M), GAM (G) y bosque aleatorio, en las mismas filas (µg/m³)")
+write_csv(val_gam, "salidas/etapa3_validacion_gam.csv")
+
+map_dfr(sort(unique(test_g$anio)), \(a) {
+  i <- test_g$anio == a
+  bind_rows(bind_cols(Año = a, Modelo = "M2", metricas_air(obs[i], pred_lin$M2[i])),
+            bind_cols(Año = a, Modelo = "G2", metricas_air(obs[i], pred_gam$G2[i])))
+}) |> kable(digits = 3, caption = "M2 vs G2 por año de validación")
+```
+
+```{r}
+#| label: gam-importancia
+# Importancia en el GAM: cuánto empeora la validación al quitar cada término de G2
+terminos <- c(TOUT = "s(TOUT)", RH = "s(RH)", WSR = "s(WSR)", lluvia = "s(lluvia, k = 5)",
+              SR = "s(SR)", lNO2 = "s(lNO2)", lCO = "s(lCO)")
+rmse_g2 <- sqrt(mean((obs - pred_gam$G2)^2))
+r_g2    <- cor(obs, pred_gam$G2)
+
+imp_gam <- imap_dfr(terminos, \(tt, v) {
+  f <- reformulate(setdiff(c(base_g, s_met, s_cont), tt), "PM25")
+  m <- ajusta_gam(f, train_g)
+  p <- as.numeric(predict(m, newdata = test_g, type = "response"))
+  tibble(Variable = v,
+         `ΔRMSE al quitarla (µg/m³)` = sqrt(mean((obs - p)^2)) - rmse_g2,
+         `Δr al quitarla` = cor(obs, p) - r_g2)
+}) |> arrange(desc(`ΔRMSE al quitarla (µg/m³)`))
+
+kable(imp_gam, digits = 3, caption = "Importancia en el GAM (G2): cambio en la validación 2024–2025 al quitar cada término")
+write_csv(imp_gam, "salidas/etapa3_importancia_gam.csv")
+```
+
+## 6.5 Nivel de cada estación ajustado por meteorología
+
+Es la aplicación directa de AirGAM al objetivo: si una estación tiene más PM2.5 solo porque ahí hay menos viento o más calma, su nivel debe bajar al compararla con la **misma meteorología** que las demás. Se calcula el nivel esperado de cada estación imponiéndole los días (meteorología y calendario) de todas las estaciones en 2021–2023; con el modelo aditivo en escala log esto equivale a multiplicar el efecto de la estación por un factor común. Se compara el nivel con solo calendario (G0, «sin ajustar») y con meteorología (G1, «ajustado»). G2 no se usa aquí porque NO2 y CO funcionan como indicadores de las fuentes, y ajustar por ellos borraría justo la diferencia que se quiere ver. Los intervalos se obtienen simulando de la distribución de los coeficientes; no incluyen la correlación entre estaciones vecinas, que sí cubre el bootstrap por bloques de la sección 4.4.
+
+```{r}
+#| label: gam-normalizado
+# Nivel de cada estación bajo la MISMA meteorología y calendario (los de todas las estaciones en 2021–2023).
+# Con enlace log y modelo aditivo: nivel_i = exp(efecto_i) × promedio_j exp(resto del predictor_j).
+nivel_normalizado <- function(m, d, B = B_boot) {
+  X  <- predict(m, newdata = d, type = "lpmatrix")
+  ie <- grep("^estacion", colnames(X))
+  niv <- function(b) exp(c(0, b[ie])) * mean(exp(X[, -ie, drop = FALSE] %*% b[-ie]))
+  bs <- rmvn(B, coef(m), vcov(m))                         # simulación de la posterior de los coeficientes
+  sim <- apply(bs, 1, niv)                                # estaciones x B
+  tibble(estacion = levels(d$estacion), nivel = niv(coef(m)),
+         LI = apply(sim, 1, quantile, 0.025), LS = apply(sim, 1, quantile, 0.975))
+}
+norm_g0 <- nivel_normalizado(gam_mods$G0, train_g)
+norm_g1 <- nivel_normalizado(gam_mods$G1, train_g)
+
+tab_norm <- train_g |> group_by(estacion) |> summarise(`Media observada` = mean(PM25), .groups = "drop") |>
+  mutate(estacion = as.character(estacion)) |>
+  left_join(norm_g0 |> transmute(estacion, `Sin ajuste meteorológico (G0)` = nivel), by = "estacion") |>
+  left_join(norm_g1 |> transmute(estacion, `Ajustado por meteorología (G1)` = nivel, LI, LS), by = "estacion") |>
+  mutate(`Cambio %` = 100 * (`Ajustado por meteorología (G1)` / `Sin ajuste meteorológico (G0)` - 1),
+         `Rango G0` = rank(`Sin ajuste meteorológico (G0)`), `Rango G1` = rank(`Ajustado por meteorología (G1)`)) |>
+  arrange(`Ajustado por meteorología (G1)`)
+kable(tab_norm, digits = 1, caption = "PM2.5 por estación, 2021–2023: nivel sin y con ajuste por meteorología (µg/m³; IC 95 % de G1; rango 1 = menor)")
+write_csv(tab_norm, "salidas/etapa3_nivel_ajustado_meteorologia.csv")
+cat("Spearman entre el orden sin y con ajuste:",
+    round(cor(tab_norm$`Rango G0`, tab_norm$`Rango G1`), 3), "\n")
+```
+
+```{r}
+#| label: fig-gam-normalizado
+bind_rows(norm_g0 |> mutate(Modelo = "Sin ajuste (G0)"), norm_g1 |> mutate(Modelo = "Ajustado por meteorología (G1)")) |>
+  mutate(estacion = fct_reorder(estacion, nivel, .fun = last)) |>
+  ggplot(aes(nivel, estacion, colour = Modelo)) +
+  geom_pointrange(aes(xmin = LI, xmax = LS), position = position_dodge(width = 0.5), size = 0.3) +
+  labs(x = "PM2.5 (µg/m³)", y = NULL, colour = NULL,
+       title = "Nivel de PM2.5 por estación bajo meteorología común") +
+  theme(legend.position = "bottom")
+```
+
+Si el orden de las estaciones casi no cambia (Spearman cercano a 1) y la brecha entre SE2/SO y SUR/SE3 se mantiene, sus diferencias no se explican por la meteorología medida en cada estación y apuntan a fuentes cercanas o a la topografía (una de las incógnitas de la Etapa 2). Si la brecha se reduce, parte de la peor exposición se debe a condiciones locales de dispersión.
+
+# 7. Dependencia: probabilidad de un día crítico (regresión logística con GEE)
+
+## 7.1 Modelo
 
 Un **día crítico** es un día con PM2.5 promedio de 24 h por encima de la norma vigente ese año (o del umbral fijo `umbral_fijo` si se definió). Son pocos (Etapa 2: 0.7 a 15.8 % por estación), por lo que la regresión logística es preferible al análisis discriminante. Como los días consecutivos están correlacionados, un error AR(1) gaussiano no aplica a una respuesta binaria; se usan ecuaciones de estimación generalizadas con correlación AR(1) dentro de cada estación (Liang & Zeger, 1986; Højsgaard et al., 2006), cuyos errores estándar robustos son válidos aunque la estructura de correlación no sea exacta.
 
@@ -851,7 +1149,7 @@ write_csv(or_tab, "salidas/etapa3_odds_ratios.csv")
 cat("Correlación AR(1) estimada (alfa):", round(gee$geese$alpha, 3), "\n")
 ```
 
-## 6.2 Validación
+## 7.2 Validación
 
 Se evalúa en 2024–2025 el área bajo la curva ROC (AUC; pROC, Robin et al., 2011), el puntaje de Brier, y la sensibilidad y especificidad con el umbral de probabilidad que maximiza el índice de Youden **en entrenamiento**. Se compara contra un modelo base con solo estación y temporada para ver cuánto aportan la meteorología y los otros contaminantes. Como la norma se vuelve más estricta en 2024–2025 (33 µg/m³), la tasa de días críticos cambia entre entrenamiento y validación; por eso el AUC (que no depende de la tasa base) es la métrica principal, y la calibración se revisa aparte.
 
@@ -892,7 +1190,7 @@ tibble(p = p_te, crit = test$crit) |>
   labs(title = "Calibración en validación (por deciles)")
 ```
 
-## 6.3 Importancia de las variables en la logística
+## 7.3 Importancia de las variables en la logística
 
 Se mide cuánto cae el AUC de validación al quitar cada predictora del modelo.
 
@@ -912,7 +1210,7 @@ if (exists("roc_te")) {
 }
 ```
 
-# 7. Guardar los modelos
+# 8. Guardar los modelos
 
 Se guardan los objetos necesarios para la interfaz gráfica de la siguiente fase (modelos, parámetros de estandarización y catálogo de estaciones).
 
@@ -925,13 +1223,15 @@ saveRDS(list(m2 = modelos$M2, rf = rf, gee = gee, mu = mu, sdv = sdv, vars_x = v
 sessionInfo()
 ```
 
-# 8. Actualización del objetivo (se completa con los resultados)
+# 9. Actualización del objetivo (se completa con los resultados)
 
 Cuando se tengan los resultados, aquí se reescribe el objetivo con lo que los datos permitieron responder (por ejemplo: número de grupos de exposición estables, qué parte de la variación diaria explica la meteorología, qué variables predicen los días críticos y con qué error). Este texto se redacta en conjunto después de revisar las tablas.
 
 # Referencias
 
 Breiman, L. (2001). Random forests. *Machine Learning, 45*(1), 5–32. https://doi.org/10.1023/A:1010933404324
+
+Chetna, Dhaka, S. K., Walker, S.-E., Rawat, V., & Singh, N. (2024). Long-term meteorology-adjusted and unadjusted trends of PM2.5 using the AirGAM model over Delhi, 2007–2022. *Atmospheric Environment: X, 22*, Artículo 100255. https://doi.org/10.1016/j.aeaoa.2024.100255
 
 Hair, J. F., Black, W. C., Babin, B. J., & Anderson, R. E. (2019). *Multivariate data analysis* (8.ª ed.). Cengage.
 
@@ -955,6 +1255,10 @@ Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and 
 
 Secretaría de Salud. (2021, octubre). *NOM-025-SSA1-2021, Salud ambiental. Criterio para evaluar la calidad del aire ambiente, con respecto a las partículas suspendidas PM10 y PM2.5* (Norma Oficial Mexicana). Diario Oficial de la Federación.
 
+Walker, S.-E., Solberg, S., Schneider, P., & Guerreiro, C. (2023). The AirGAM 2022r1 air quality trend and prediction model. *Geoscientific Model Development, 16*(2), 573–595. https://doi.org/10.5194/gmd-16-573-2023
+
 Ward, J. H. (1963). Hierarchical grouping to optimize an objective function. *Journal of the American Statistical Association, 58*(301), 236–244. https://doi.org/10.1080/01621459.1963.10500845
+
+Wood, S. N. (2017). *Generalized additive models: An introduction with R* (2.ª ed.). Chapman and Hall/CRC. https://doi.org/10.1201/9781315370279
 
 World Health Organization. (2021). *WHO global air quality guidelines* (WHO/HEP/ECH/AQG/2021.1). World Health Organization.
