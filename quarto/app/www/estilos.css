@@ -1,0 +1,303 @@
+/* ==========================================================
+   DATOS EN EL AIRE · SIMA ZMM
+   Hoja de estilos única. Se incrusta desde app.R.
+   ========================================================== */
+
+   :root {
+    --tinta: #0d2b36;
+    --aire-950: #0f2f3a;
+    --aire-900: #174653;
+    --aire-800: #206775;
+    --aire-700: #287b83;
+    --aire-600: #32a49b;
+    --aire-200: #bfe5e1;
+    --aire-100: #e3f3f2;
+    --brasa: #e0902f;                 /* acento cálido */
+  
+    --fondo: #eef3f5;
+    --superficie: #ffffff;
+    --borde: #d3e0e6;
+    --texto: #1f3641;
+    --texto-2: #4d6470;
+  
+    --verde: #168566;
+    --ambar: #b77912;
+    --rojo: #c44242;
+  
+    --radio: 12px;
+    --sombra: 0 2px 8px rgba(15, 47, 58, 0.07);
+    --sombra-2: 0 8px 22px rgba(15, 47, 58, 0.13);
+  }
+  
+  /* ---------- 1. Base ---------- */
+  html { scroll-behavior: smooth; }
+  
+  body {
+    background: linear-gradient(180deg, #e6eef2 0, var(--fondo) 320px) fixed;
+    color: var(--texto);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  
+  h1, h2, h3, h4, h5 { color: var(--aire-950); font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; }
+  .card-body p, .card-body li { color: var(--texto); }
+  .text-muted, .help-block, .form-text, .shiny-input-container .help-block { color: var(--texto-2) !important; }
+  a { color: var(--aire-700); }
+  a:hover { color: var(--aire-900); }
+  
+  /* ---------- 2. Barra de navegación ---------- */
+  .navbar {
+    --bs-navbar-color: #d6ecee;
+    --bs-navbar-hover-color: #ffffff;
+    --bs-navbar-active-color: #ffffff;
+    --bs-navbar-brand-color: #ffffff;
+    --bs-navbar-brand-hover-color: #ffffff;
+    background: var(--aire-950) !important;
+    border-bottom: 3px solid var(--brasa);
+    box-shadow: 0 4px 14px rgba(15, 47, 58, 0.22);
+    padding: 0.35rem 1rem;
+  }
+  .navbar .navbar-brand { font-weight: 750; letter-spacing: -0.02em; }
+  .navbar .nav-link { font-weight: 600; border-radius: 8px; padding: 0.5rem 0.85rem !important; transition: background 0.2s ease; }
+  .navbar .nav-link:hover { background: rgba(255, 255, 255, 0.10); }
+  .navbar .nav-link.active, .navbar .nav-link[aria-current="page"] {
+    background: var(--aire-700) !important;
+    color: #ffffff !important;
+  }
+  .navbar .nav-link i, .navbar .nav-link svg, .navbar .navbar-brand i, .navbar .navbar-brand svg { margin-right: 0.4rem; }
+  .navbar-toggler { border-color: rgba(255, 255, 255, 0.45); }
+  .navbar-toggler-icon { filter: invert(1) brightness(2); }
+  
+  /* ---------- 3. Banner de portada ---------- */
+  .app-banner {
+    position: relative;
+    overflow: hidden;
+    margin: 1rem 0 1.25rem;
+    padding: 1.6rem 2rem;
+    border-radius: 14px;
+    color: #ffffff;
+    box-shadow: var(--sombra-2);
+    background:
+      radial-gradient(circle at 92% 15%, rgba(50, 164, 155, 0.50), transparent 45%),
+      repeating-radial-gradient(circle at 100% 0, rgba(255, 255, 255, 0.055) 0 2px, transparent 2px 24px),
+      linear-gradient(120deg, var(--aire-950), var(--aire-800));
+  }
+  .app-banner h2 {
+    color: #ffffff;
+    margin: 0.45rem 0 0.5rem;
+    font-size: clamp(1.35rem, 2.4vw, 1.95rem);
+  }
+  .app-banner h2::after {
+    content: "";
+    display: block;
+    width: 56px;
+    height: 4px;
+    border-radius: 3px;
+    background: var(--brasa);
+    margin-top: 0.7rem;
+  }
+  .app-banner p { color: #d6ecee; margin: 0; max-width: 62ch; }
+  .app-eyebrow {
+    display: inline-block;
+    color: #8fe3d8;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .app-banner-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+  .app-banner-chips span {
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 999px;
+    padding: 0.2rem 0.75rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #ffffff;
+  }
+  
+  /* ---------- 4. Panel lateral ---------- */
+  .bslib-sidebar-layout { --_sidebar-bg: #e2edf1; --_border-color: var(--borde); }
+  .bslib-sidebar-layout > .sidebar { background: #e2edf1 !important; border-right: 1px solid #c8dbe3 !important; }
+  .bslib-sidebar-layout > .sidebar .sidebar-title { color: var(--aire-950); font-weight: 750; font-size: 1.05rem; }
+  .bslib-sidebar-layout > .main { background: transparent; }
+  .sidebar .control-label, .sidebar label { color: var(--aire-900); font-weight: 650; font-size: 0.9rem; }
+  .sidebar hr { border-color: #c6d9e0; opacity: 1; }
+  .irs-grid { display: none; }
+  
+  /* ---------- 5. Tarjetas ---------- */
+  .card, .bslib-card, .well {
+    background: var(--superficie);
+    border: 1px solid var(--borde);
+    border-radius: var(--radio);
+    box-shadow: var(--sombra);
+    overflow: hidden;
+    transition: box-shadow 0.2s ease;
+  }
+  .card:hover, .bslib-card:hover { box-shadow: var(--sombra-2); }
+  .card-header, .bslib-card .card-header {
+    background: linear-gradient(100deg, #e1eff3 0%, #f4f9fa 100%);
+    color: var(--aire-950);
+    font-weight: 700;
+    border-bottom: 1px solid #cfdee5;
+    border-left: 4px solid var(--aire-700);
+    padding: 0.8rem 1rem;
+  }
+  .card-body { padding: 1rem 1.1rem; }
+  .card-footer { background: #f6fafb; color: var(--texto-2); font-size: 0.85rem; }
+  
+  /* ---------- 6. Semáforo (color + icono + texto) ---------- */
+  .semaforo {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.2rem 1.4rem;
+    border-radius: var(--radio);
+    border: 1px solid transparent;
+    margin-bottom: 1rem;
+    box-shadow: 0 5px 15px rgba(15, 47, 58, 0.14);
+  }
+  .semaforo::after {
+    content: "";
+    position: absolute;
+    width: 130px; height: 130px;
+    right: -40px; top: -55px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    pointer-events: none;
+  }
+  .semaforo h3 { margin: 0 0 0.35rem; font-size: 1.2rem; color: inherit; }
+  .semaforo p { margin: 0; color: inherit; opacity: 0.95; }
+  .semaforo-icono { font-size: 2.4rem; line-height: 1; min-width: 3rem; text-align: center; flex-shrink: 0; }
+  .semaforo-aviso { margin-top: 0.6rem !important; font-weight: 650; }
+  .semaforo-bajo  { background: linear-gradient(120deg, #146a52, #25a07d); color: #ffffff; }
+  .semaforo-medio { background: linear-gradient(120deg, #ffeab5, #fff4d6); color: #5c3d05; border-left: 8px solid var(--brasa); }
+  .semaforo-alto  { background: linear-gradient(120deg, #a22c35, #d84f4f); color: #ffffff; }
+  
+  /* ---------- 7. Cifras ---------- */
+  .cifras { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 0.9rem; }
+  .cifra {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 125px;
+    padding: 1rem 1.15rem;
+    border: 1px solid var(--borde);
+    border-top: 4px solid var(--aire-700);
+    border-radius: 11px;
+    background: linear-gradient(145deg, #ffffff, #f1f7f9);
+    box-shadow: var(--sombra);
+  }
+  .cifra-etiqueta { font-size: 0.78rem; font-weight: 700; color: var(--aire-800); letter-spacing: 0.04em; text-transform: uppercase; }
+  .cifra-valor { color: var(--aire-950); font-size: clamp(1.7rem, 2.5vw, 2.25rem); font-weight: 780; letter-spacing: -0.035em; line-height: 1.2; margin: 0.4rem 0; overflow-wrap: anywhere; }
+  .cifra-unidad { font-size: 0.9rem; font-weight: 500; color: var(--texto-2); }
+  .cifra-nota { font-size: 0.84rem; color: var(--texto-2); margin-top: 0.25rem; }
+  .cifra.crit-si { border-top-color: var(--rojo); }
+  .cifra.crit-no { border-top-color: var(--verde); }
+  /* La primera cifra (PM2.5 esperado) se destaca */
+  .cifras .cifra:first-child { background: linear-gradient(135deg, var(--aire-900), var(--aire-700)); border-color: var(--aire-900); border-top-color: var(--brasa); }
+  .cifras .cifra:first-child .cifra-etiqueta { color: var(--aire-200); }
+  .cifras .cifra:first-child .cifra-valor { color: #ffffff; }
+  .cifras .cifra:first-child .cifra-unidad, .cifras .cifra:first-child .cifra-nota { color: #d9eeee; }
+  
+  /* ---------- 8. Controles ---------- */
+  .form-control, .form-select, .selectize-input, input[type="text"], input[type="number"], input[type="date"] {
+    color: var(--texto);
+    background-color: #ffffff;
+    border: 1px solid #b9cfd8;
+    border-radius: 9px;
+    min-height: 38px;
+    box-shadow: none;
+  }
+  .form-control:focus, .form-select:focus, .selectize-input.focus, input:focus {
+    border-color: var(--aire-600);
+    box-shadow: 0 0 0 3px rgba(50, 164, 155, 0.20);
+    outline: none;
+  }
+  .form-check-input:checked { background-color: var(--aire-700); border-color: var(--aire-700); }
+  .irs--shiny .irs-bar { background: var(--aire-700); border-color: var(--aire-700); }
+  .irs--shiny .irs-line { background: #c3d7df; border-color: #c3d7df; }
+  .irs--shiny .irs-handle { background: var(--aire-700); border: 3px solid #ffffff; box-shadow: 0 0 0 2px var(--aire-700); }
+  .irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-single { background: var(--aire-800); color: #ffffff; border-radius: 5px; }
+  .irs--shiny .irs-min, .irs--shiny .irs-max { color: var(--texto-2); background: transparent; }
+  
+  /* ---------- 9. Botones ---------- */
+  .btn { border-radius: 9px; font-weight: 650; padding: 0.5rem 0.95rem; transition: background 0.2s ease, box-shadow 0.2s ease; }
+  .btn-primary { background: var(--aire-800); border-color: var(--aire-800); color: #ffffff; }
+  .btn-primary:hover, .btn-primary:focus { background: var(--aire-950); border-color: var(--aire-950); box-shadow: 0 4px 12px rgba(15, 47, 58, 0.22); }
+  .btn-outline-secondary { color: var(--aire-900); border-color: #9fbac5; }
+  .btn-outline-secondary:hover { background: var(--aire-100); border-color: var(--aire-700); color: var(--aire-950); }
+  
+  /* ---------- 10. Tablas ---------- */
+  .table {
+    --bs-table-bg: #ffffff;
+    --bs-table-striped-bg: #eaf2f5;
+    --bs-table-hover-bg: #d9eeec;
+    --bs-table-color: var(--texto);
+    border: 1px solid var(--borde);
+  }
+  .table > thead > tr > th { background: var(--aire-900); color: #ffffff; font-size: 0.83rem; font-weight: 700; padding: 0.65rem 0.75rem; border-color: var(--aire-900); }
+  .table > tbody > tr > td { padding: 0.55rem 0.75rem; }
+  table.dataTable { border: 1px solid var(--borde); }
+  table.dataTable thead th { background: var(--aire-900); color: #ffffff; border-color: var(--aire-900); }
+  table.dataTable tbody tr:nth-child(even) > * { background-color: #eaf2f5; }
+  table.dataTable tbody tr:hover > * { background-color: #d9eeec; }
+  .dataTables_wrapper .dataTables_filter input, .dataTables_wrapper .dataTables_length select { border: 1px solid #b9cfd8; border-radius: 8px; padding: 0.3rem 0.6rem; }
+  
+  /* ---------- 11. Mensajes ---------- */
+  .alert { border-radius: 10px; padding: 0.75rem 1rem; }
+  .alert-info    { background: #dceef2; border-color: #b8dce4; color: var(--aire-900); }
+  .alert-success { background: #e0f3e9; border-color: #b5e1cc; color: #176747; }
+  .alert-warning { background: #fff1d1; border-color: #efd494; color: #6e4a0b; }
+  .alert-danger  { background: #fbe6e6; border-color: #efc0c0; color: #8f2a31; }
+  
+  details { margin-top: 0.75rem; padding: 0.8rem 1rem; border: 1px solid var(--borde); border-radius: 9px; background: #f7fafb; }
+  summary { cursor: pointer; color: var(--aire-900); font-weight: 700; }
+  details[open] summary { margin-bottom: 0.6rem; }
+  
+  .referencia { padding-left: 2rem; text-indent: -2rem; margin-bottom: 0.5rem; }
+  
+  /* ---------- 12. Mapa y gráficas ---------- */
+  .leaflet-container { border-radius: 10px; font-family: inherit; }
+  .leaflet-tooltip { font-weight: 700; }
+  .shiny-plot-output, .plotly.html-widget { max-width: 100%; }
+  
+  /* ---------- 13. Pie de página ---------- */
+  .app-footer {
+    margin-top: 2rem;
+    padding: 1.2rem 1.5rem;
+    background: var(--aire-950);
+    color: #c9e1e4;
+    font-size: 0.85rem;
+    text-align: center;
+    border-top: 3px solid var(--brasa);
+  }
+  .app-footer strong { color: #ffffff; }
+  .app-contenedor-error { max-width: 900px; margin: 0 auto; padding: 0 1rem; }
+  
+  /* ---------- 14. Carga ---------- */
+  .shiny-busy .btn { cursor: progress; }
+  .recalculating { opacity: 0.65; transition: opacity 0.2s ease; }
+  
+  /* ---------- 15. Pantallas pequeñas ---------- */
+  @media (max-width: 768px) {
+    .navbar { padding: 0.3rem 0.6rem; }
+    .app-banner { padding: 1.2rem 1.1rem; margin-top: 0.6rem; }
+    .semaforo { align-items: flex-start; gap: 0.8rem; padding: 1rem; }
+    .semaforo-icono { font-size: 2rem; min-width: 2.3rem; }
+    .cifras { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
+    .cifra { min-height: 112px; padding: 0.85rem; }
+    .card-header, .bslib-card .card-header { padding: 0.7rem 0.8rem; }
+    .card-body { padding: 0.8rem; }
+    .bslib-sidebar-layout > .sidebar { border-right: none !important; border-bottom: 1px solid #c8dbe3 !important; }
+  }
+  @media (max-width: 420px) { .cifras { grid-template-columns: 1fr; } }
+  
+  /* ---------- 16. Accesibilidad ---------- */
+  :focus-visible { outline: 3px solid rgba(50, 164, 155, 0.75); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  }

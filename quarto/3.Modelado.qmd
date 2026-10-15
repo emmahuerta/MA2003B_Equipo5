@@ -1216,11 +1216,24 @@ Se guardan los objetos necesarios para la interfaz gráfica de la siguiente fase
 
 ```{r}
 #| label: guardar
-saveRDS(list(m2 = modelos$M2, rf = rf, gee = gee, mu = mu, sdv = sdv, vars_x = vars_x,
-             smear_m2 = smear[["M2"]], umbral_prob = thr, est_c = est_c,
-             pca = pca, grupos = grupo_est, cat_est = cat_est),
-        "salidas/etapa3_modelos.rds")
-sessionInfo()
+# Rangos de entrenamiento de las predictoras (para limitar los controles de la app)
+rangos <- reg_cc |> filter(anio %in% anios_comunes) |>
+  select(all_of(c("TOUT", "RH", "WSR", "RAINF", "SR", "NO2", "CO"))) |>
+  pivot_longer(everything(), names_to = "variable") |>
+  group_by(variable) |>
+  summarise(min = min(value), p01 = quantile(value, 0.01), p50 = median(value),
+            p99 = quantile(value, 0.99), max = max(value), .groups = "drop")
+write_csv(rangos, "salidas/etapa3_rangos_variables.csv")
+
+saveRDS(list(
+  m2 = modelos$M2, rf = rf, gee = gee,
+  gam = gam_mods, gam_nudos = nudos, usa_wd = usa_wd,
+  mu = mu, sdv = sdv, vars_x = vars_x,
+  smear_m2 = smear[["M2"]], smear_rf = smear[["RF"]],
+  umbral_prob = thr, umbral_critico = if (is.null(umbral_fijo)) NA else umbral_fijo,
+  est_c = est_c, pca = pca, grupos = grupo_est, cat_est = cat_est,
+  validacion = val_gam, importancia_gam = imp_gam, nivel_ajustado = tab_norm, rangos = rangos),
+  "salidas/etapa3_modelos.rds", compress = "xz")
 ```
 
 # 9. Actualización del objetivo (se completa con los resultados)

@@ -7012,57 +7012,25 @@ Table: Cambio del AUC de validación al quitar cada predictora (más negativo = 
 <div class="cell">
 <details open class="code-fold">
 <summary>Código</summary>
-<div class="sourceCode cell-code" id="cb75"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a><span class="fu">saveRDS</span>(<span class="fu">list</span>(<span class="at">m2 =</span> modelos<span class="sc">$</span>M2, <span class="at">rf =</span> rf, <span class="at">gee =</span> gee, <span class="at">mu =</span> mu, <span class="at">sdv =</span> sdv, <span class="at">vars_x =</span> vars_x,</span>
-<span id="cb75-2"><a href="#cb75-2" aria-hidden="true" tabindex="-1"></a>             <span class="at">smear_m2 =</span> smear[[<span class="st">&quot;M2&quot;</span>]], <span class="at">umbral_prob =</span> thr, <span class="at">est_c =</span> est_c,</span>
-<span id="cb75-3"><a href="#cb75-3" aria-hidden="true" tabindex="-1"></a>             <span class="at">pca =</span> pca, <span class="at">grupos =</span> grupo_est, <span class="at">cat_est =</span> cat_est),</span>
-<span id="cb75-4"><a href="#cb75-4" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;salidas/etapa3_modelos.rds&quot;</span>)</span>
-<span id="cb75-5"><a href="#cb75-5" aria-hidden="true" tabindex="-1"></a><span class="fu">sessionInfo</span>()</span></code><button title="Copiar al portapapeles" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb75"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Rangos de entrenamiento de las predictoras (para limitar los controles de la app)</span></span>
+<span id="cb75-2"><a href="#cb75-2" aria-hidden="true" tabindex="-1"></a>rangos <span class="ot">&lt;-</span> reg_cc <span class="sc">|&gt;</span> <span class="fu">filter</span>(anio <span class="sc">%in%</span> anios_comunes) <span class="sc">|&gt;</span></span>
+<span id="cb75-3"><a href="#cb75-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">select</span>(<span class="fu">all_of</span>(<span class="fu">c</span>(<span class="st">&quot;TOUT&quot;</span>, <span class="st">&quot;RH&quot;</span>, <span class="st">&quot;WSR&quot;</span>, <span class="st">&quot;RAINF&quot;</span>, <span class="st">&quot;SR&quot;</span>, <span class="st">&quot;NO2&quot;</span>, <span class="st">&quot;CO&quot;</span>))) <span class="sc">|&gt;</span></span>
+<span id="cb75-4"><a href="#cb75-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">pivot_longer</span>(<span class="fu">everything</span>(), <span class="at">names_to =</span> <span class="st">&quot;variable&quot;</span>) <span class="sc">|&gt;</span></span>
+<span id="cb75-5"><a href="#cb75-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">group_by</span>(variable) <span class="sc">|&gt;</span></span>
+<span id="cb75-6"><a href="#cb75-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">summarise</span>(<span class="at">min =</span> <span class="fu">min</span>(value), <span class="at">p01 =</span> <span class="fu">quantile</span>(value, <span class="fl">0.01</span>), <span class="at">p50 =</span> <span class="fu">median</span>(value),</span>
+<span id="cb75-7"><a href="#cb75-7" aria-hidden="true" tabindex="-1"></a>            <span class="at">p99 =</span> <span class="fu">quantile</span>(value, <span class="fl">0.99</span>), <span class="at">max =</span> <span class="fu">max</span>(value), <span class="at">.groups =</span> <span class="st">&quot;drop&quot;</span>)</span>
+<span id="cb75-8"><a href="#cb75-8" aria-hidden="true" tabindex="-1"></a><span class="fu">write_csv</span>(rangos, <span class="st">&quot;salidas/etapa3_rangos_variables.csv&quot;</span>)</span>
+<span id="cb75-9"><a href="#cb75-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb75-10"><a href="#cb75-10" aria-hidden="true" tabindex="-1"></a><span class="fu">saveRDS</span>(<span class="fu">list</span>(</span>
+<span id="cb75-11"><a href="#cb75-11" aria-hidden="true" tabindex="-1"></a>  <span class="at">m2 =</span> modelos<span class="sc">$</span>M2, <span class="at">rf =</span> rf, <span class="at">gee =</span> gee,</span>
+<span id="cb75-12"><a href="#cb75-12" aria-hidden="true" tabindex="-1"></a>  <span class="at">gam =</span> gam_mods, <span class="at">gam_nudos =</span> nudos, <span class="at">usa_wd =</span> usa_wd,</span>
+<span id="cb75-13"><a href="#cb75-13" aria-hidden="true" tabindex="-1"></a>  <span class="at">mu =</span> mu, <span class="at">sdv =</span> sdv, <span class="at">vars_x =</span> vars_x,</span>
+<span id="cb75-14"><a href="#cb75-14" aria-hidden="true" tabindex="-1"></a>  <span class="at">smear_m2 =</span> smear[[<span class="st">&quot;M2&quot;</span>]], <span class="at">smear_rf =</span> smear[[<span class="st">&quot;RF&quot;</span>]],</span>
+<span id="cb75-15"><a href="#cb75-15" aria-hidden="true" tabindex="-1"></a>  <span class="at">umbral_prob =</span> thr, <span class="at">umbral_critico =</span> <span class="cf">if</span> (<span class="fu">is.null</span>(umbral_fijo)) <span class="cn">NA</span> <span class="cf">else</span> umbral_fijo,</span>
+<span id="cb75-16"><a href="#cb75-16" aria-hidden="true" tabindex="-1"></a>  <span class="at">est_c =</span> est_c, <span class="at">pca =</span> pca, <span class="at">grupos =</span> grupo_est, <span class="at">cat_est =</span> cat_est,</span>
+<span id="cb75-17"><a href="#cb75-17" aria-hidden="true" tabindex="-1"></a>  <span class="at">validacion =</span> val_gam, <span class="at">importancia_gam =</span> imp_gam, <span class="at">nivel_ajustado =</span> tab_norm, <span class="at">rangos =</span> rangos),</span>
+<span id="cb75-18"><a href="#cb75-18" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;salidas/etapa3_modelos.rds&quot;</span>, <span class="at">compress =</span> <span class="st">&quot;xz&quot;</span>)</span></code><button title="Copiar al portapapeles" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </details>
-<div class="cell-output cell-output-stdout">
-<pre><code>R version 4.5.0 (2025-04-11)
-Platform: aarch64-apple-darwin20
-Running under: macOS Sequoia 15.6.1
-
-Matrix products: default
-BLAS:   /Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRblas.0.dylib 
-LAPACK: /Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.1
-
-locale:
-[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
-
-time zone: America/Monterrey
-tzcode source: internal
-
-attached base packages:
-[1] stats     graphics  grDevices datasets  utils     methods   base     
-
-other attached packages:
- [1] mgcv_1.9-1      cluster_2.1.8.3 ranger_0.18.0   pROC_1.19.1    
- [5] geepack_1.3.13  emmeans_2.0.4   nlme_3.1-168    knitr_1.52     
- [9] scales_1.4.0    lubridate_1.9.5 forcats_1.0.1   stringr_1.6.0  
-[13] dplyr_1.2.1     purrr_1.2.2     readr_2.2.0     tidyr_1.3.2    
-[17] tibble_3.3.1    ggplot2_4.0.3   tidyverse_2.0.0
-
-loaded via a namespace (and not attached):
- [1] gtable_0.3.6        xfun_0.61           lattice_0.22-6     
- [4] tzdb_0.5.0          numDeriv_2016.8-1.1 vctrs_0.7.3        
- [7] tools_4.5.0         generics_0.1.4      parallel_4.5.0     
-[10] pkgconfig_2.0.3     Matrix_1.7-3        RColorBrewer_1.1-3 
-[13] S7_0.2.2            lifecycle_1.0.5     compiler_4.5.0     
-[16] farver_2.1.2        carData_3.0-6       htmltools_0.5.9    
-[19] yaml_2.3.12         Formula_1.2-6       pillar_1.11.1      
-[22] car_3.1-5           crayon_1.5.3        MASS_7.3-66        
-[25] abind_1.4-8         tidyselect_1.2.1    digest_0.6.39      
-[28] mvtnorm_1.4-2       stringi_1.8.9       labeling_0.4.3     
-[31] splines_4.5.0       fastmap_1.2.0       grid_4.5.0         
-[34] cli_3.6.6           magrittr_2.0.5      broom_1.0.13       
-[37] withr_3.0.3         backports_1.5.1     bit64_4.8.6        
-[40] estimability_2.0.0  timechange_0.4.0    rmarkdown_2.32     
-[43] bit_4.6.0           otel_0.2.0          hms_1.1.4          
-[46] evaluate_1.0.5      rlang_1.3.0         Rcpp_1.1.2         
-[49] glue_1.8.1          renv_1.2.4          vroom_1.7.1        
-[52] jsonlite_2.0.0      R6_2.6.1           </code></pre>
-</div>
 </div>
 </section>
 <section id="actualización-del-objetivo-se-completa-con-los-resultados" class="level1">
