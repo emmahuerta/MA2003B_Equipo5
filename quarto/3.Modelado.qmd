@@ -1054,6 +1054,22 @@ map_dfr(sort(unique(test_g$anio)), \(a) {
 ```
 
 ```{r}
+#| label: gam-diagnostico-g2
+g2 <- gam_mods$G2
+res_g2 <- tibble(ajustado = fitted(g2), residuo = residuals(g2, type = "deviance"))
+print(ggplot(res_g2, aes(sample = residuo)) + stat_qq(size = 0.4, alpha = 0.4) +
+        stat_qq_line(colour = "firebrick") + labs(title = "QQ de los residuos de devianza (G2)"))
+print(ggplot(res_g2, aes(log(ajustado), residuo)) + geom_point(size = 0.4, alpha = 0.3) +
+        geom_hline(yintercept = 0, colour = "firebrick") +
+        labs(title = "Residuos de devianza vs predictor lineal (G2)", x = "log(PM2.5) ajustado"))
+
+test_g |> mutate(pred = pred_gam$G2) |> group_by(estacion) |>
+  summarise(n = n(), RMSE = sqrt(mean((PM25 - pred)^2)), MAE = mean(abs(PM25 - pred)),
+            r = cor(PM25, pred), .groups = "drop") |>
+  kable(digits = 2, caption = "G2: errores de validación por estación, 2024–2025 (µg/m³)")
+```
+
+```{r}
 #| label: gam-importancia
 # Importancia en el GAM: cuánto empeora la validación al quitar cada término de G2
 terminos <- c(TOUT = "s(TOUT)", RH = "s(RH)", WSR = "s(WSR)", lluvia = "s(lluvia, k = 5)",
