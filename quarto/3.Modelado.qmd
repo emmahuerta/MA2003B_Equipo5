@@ -1252,6 +1252,21 @@ saveRDS(list(
   "salidas/etapa3_modelos.rds", compress = "xz")
 ```
 
+```{r}
+#| label: guardar-insumos-presentacion
+saveRDS(list(
+  # datos del GAM: sirven para extender el GAM a PM10 y para dibujar las curvas
+  train_g = train_g, test_g = test_g, pred_gam = pred_gam, obs = obs,
+  # regresión logística en validación
+  test = test[, c("estacion", "dia", "anio", "crit")],
+  p_te = as.numeric(p_te), p_te_b = as.numeric(p_te_b), thr = thr,
+  # grupos: estabilidad por bootstrap, replicación por año, silueta
+  estab = estab, rep_tab = rep_tab, sil_k = sil_k, ari_b = ari_b,
+  # cambio de cada año respecto de 2021-2023
+  cambio = cambio),
+  "salidas/etapa3_insumos_presentacion.rds")
+```
+
 # 9. Actualización del objetivo (se completa con los resultados)
 
 Cuando se tengan los resultados, aquí se reescribe el objetivo con lo que los datos permitieron responder (por ejemplo: número de grupos de exposición estables, qué parte de la variación diaria explica la meteorología, qué variables predicen los días críticos y con qué error). Este texto se redacta en conjunto después de revisar las tablas.

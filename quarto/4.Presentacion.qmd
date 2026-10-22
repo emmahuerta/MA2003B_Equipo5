@@ -1,0 +1,1080 @@
+---
+title: "4. Insumos para la presentación final"
+subtitle: "Figuras, tablas, mapas y ranking · Equipo 5 · Aplicación de métodos multivariados en ciencia de datos"
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+# Qué hace este documento
+
+Este documento **no vuelve a ajustar** los modelos de la Etapa 3. Lee lo que ya guardó `3_Modelado.qmd` y genera, en un solo lugar, todo lo que se usará en la presentación de 15 minutos. Cada resultado queda atado a **un** modelo, para que en la exposición siempre se pueda responder de dónde sale la cifra, con qué variables y con qué supuestos.
+
+| Resultado de la presentación | Modelo que lo produce | Sección |
+|---|---|---|
+| Ranking de estaciones (dónde y cuándo) | Modelo lineal con errores AR(1) + bootstrap por bloques | 3 |
+| Ranking integral «mejor para vivir» (**nuevo**) | Índice sobre los indicadores del ranking + bootstrap por bloques | 3.4 |
+| 1. Grupos de exposición | PCA + conglomerados (Ward, k-medias) + bootstrap | 4 |
+| 2. Qué explica el PM2.5 y qué cambia con el clima | GAM Gamma con AR(1) (**ahora también para PM10**) | 5 |
+| 3. Días críticos | Regresión logística con GEE AR(1) | 6 |
+
+**Productos.** Todo se guarda en `presentacion/figuras/` (PNG a 300 dpi, formato 16:9) y `presentacion/tablas/` (CSV siempre; PNG si `gt` puede exportar). Las tablas y salidas nuevas van a `salidas/etapa4_*`.
+
+**Orden de ejecución.** (1) Paso 0 (se hace una sola vez en `3_Modelado.qmd`); (2) este documento completo. El ajuste de los GAM de PM10 (sección 5.5) es lo más lento; el resto corre en segundos o pocos minutos (el bootstrap del ranking integral).
+
+# 0. Paso previo: guardar los insumos que faltan
+
+`3_Modelado.qmd` ya guarda los modelos (`etapa3_modelos.rds`) y varias tablas en CSV. Para las figuras de la presentación faltan objetos que solo existen en la sesión: las bases de entrenamiento y validación del GAM (también son necesarias para ajustar PM10), las predicciones de la logística y los resultados del bootstrap de los grupos. Se agrega este chunk **al final de `3_Modelado.qmd`** (o se ejecuta en la sesión de R donde esos objetos ya existen). No cambia nada de lo anterior.
+
+```{r}
+#| label: paso-0
+#| eval: false
+saveRDS(list(
+  # datos del GAM: sirven para extender el GAM a PM10 y para dibujar las curvas
+  train_g = train_g, test_g = test_g, pred_gam = pred_gam, obs = obs,
+  # regresión logística en validación
+  test = test[, c("estacion", "dia", "anio", "crit")],
+  p_te = as.numeric(p_te), p_te_b = as.numeric(p_te_b), thr = thr,
+  # grupos: estabilidad por bootstrap, replicación por año, silueta
+  estab = estab, rep_tab = rep_tab, sil_k = sil_k, ari_b = ari_b,
+  # cambio de cada año respecto de 2021-2023 (diagnóstico de equipos)
+  cambio = cambio),
+  "salidas/etapa3_insumos_presentacion.rds")
+```
+
+# 1. Configuración
+
+Se cargan los paquetes (se instalan los que falten) y se fijan los parámetros. `usar_mapa_base` dibuja los mapas sobre un mapa de calles descargado de internet; si falla en su computadora, se cambia a `FALSE` y los mapas salen solo con los puntos. `pesos_indice` define el peso de cada indicador en el ranking integral (sección 3.4): por defecto, los cuatro pesan igual.
+
+```{r}
+#| label: setup
+paquetes <- c("tidyverse", "lubridate", "scales", "knitr", "mgcv", "pROC", "sf",
+              "ggrepel", "patchwork", "gt", "webshot2", "ggspatial", "rosm", "prettymapr")
+faltan <- setdiff(paquetes, rownames(installed.packages()))
+if (length(faltan) > 0) install.packages(faltan)
+invisible(lapply(setdiff(paquetes, c("webshot2", "rosm", "prettymapr")), library, character.only = TRUE))
+
+set.seed(2026)
+B_boot         <- 500     # réplicas del bootstrap por bloques (igual que en la Etapa 3)
+usar_mapa_base <- TRUE    # FALSE si no hay internet o falla la descarga de los mosaicos
+pesos_indice   <- c(media25 = 1, media10 = 1, nom25 = 1, nom10 = 1)
+
+dir_fig <- "presentacion/figuras"
+dir_tab <- "presentacion/tablas"
+dir.create(dir_fig, recursive = TRUE, showWarnings = FALSE)
+dir.create(dir_tab, recursive = TRUE, showWarnings = FALSE)
+dir.create("salidas", showWarnings = FALSE)
+
+meses_es <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+
+# Límites 24 h vigentes cada año (Secretaría de Salud, 2021); mismos valores que en la Etapa 3
+lim_norma <- tribble(
+  ~anio, ~PM25_24h, ~PM10_24h,
+  2020, 45, 75,   2021, 45, 75,
+  2022, 41, 70,   2023, 41, 70,
+  2024, 33, 60,   2025, 33, 60
+)
+```
+
+## 1.1 Estilo y funciones de apoyo
+
+La paleta imita la de las diapositivas del adelanto (verdes). Los tres grupos usan verde (menor exposición), ámbar (intermedio) y rojo (mayor exposición). `guarda_fig()` guarda cada figura en PNG con proporción 16:9, y `guarda_tabla()` guarda cada tabla en CSV y, si puede, en PNG.
+
+```{r}
+#| label: estilo
+pal <- list(verde_osc = "#00595A", verde = "#6A8F5C", verde_cl = "#B5D3A8",
+            gris = "#4D4D4D", rojo = "#C8553D", ambar = "#E0A93B", azul = "#3B7EA1")
+pal_grupo <- c("1" = pal$verde, "2" = pal$ambar, "3" = pal$rojo)
+etq_grupo <- c("1" = "Grupo 1 (menor exposición)", "2" = "Grupo 2 (intermedio)",
+               "3" = "Grupo 3 (mayor exposición)")
+etq_var <- c(TOUT = "Temperatura", RH = "Humedad", WSR = "Viento", lluvia = "Lluvia",
+             SR = "Radiación", lNO2 = "NO2", lCO = "CO")
+
+theme_pres <- function(base = 16) {
+  theme_minimal(base_size = base) +
+    theme(plot.title = element_text(face = "bold", colour = pal$verde_osc),
+          plot.subtitle = element_text(colour = pal$gris),
+          plot.title.position = "plot",
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom")
+}
+theme_set(theme_pres())
+
+guarda_fig <- function(p, nombre, w = 10, h = 5.6) {
+  ggsave(file.path(dir_fig, paste0(nombre, ".png")), p, width = w, height = h, dpi = 300, bg = "white")
+  p
+}
+
+guarda_tabla <- function(d, nombre, titulo = NULL) {
+  write_csv(d, file.path(dir_tab, paste0(nombre, ".csv")))
+  g <- gt(d) |>
+    tab_options(table.font.size = 14, column_labels.background.color = pal$verde_osc) |>
+    tab_style(style = cell_text(color = "white", weight = "bold"), locations = cells_column_labels())
+  if (!is.null(titulo)) g <- tab_header(g, title = titulo)
+  tryCatch(gtsave(g, file.path(dir_tab, paste0(nombre, ".png"))),
+           error = \(e) message("PNG de '", nombre, "' no generado (falta webshot2 o Chrome); queda el CSV."))
+  g
+}
+```
+
+# 2. Carga de insumos
+
+Se leen los modelos y tablas de la Etapa 3, los insumos del paso 0 y las bases diarias de la Etapa 2. Las columnas con nombres largos o con símbolos se renombran **por posición** para no depender de la codificación del archivo.
+
+```{r}
+#| label: carga
+mods <- readRDS("salidas/etapa3_modelos.rds")
+ins  <- readRDS("salidas/etapa3_insumos_presentacion.rds")
+datos_dia   <- readRDS("salidas/etapa2_datos_diarios.rds")
+datos_dia_c <- readRDS("salidas/etapa2_datos_diarios_comunes.rds")
+
+est_c  <- mods$est_c                                    # las 12 estaciones del periodo común
+grupos <- mods$grupos |> mutate(grupo = factor(grupo))  # estacion, grupo, zona, msnm, PM25_medio, PM10_medio
+
+orden_boot <- read_csv("salidas/etapa3_orden_bootstrap.csv", show_col_types = FALSE)
+emm_mes    <- read_csv("salidas/etapa3_emmeans_mes.csv", show_col_types = FALSE) |>
+  rename(media = 3) |> mutate(mes = factor(mes, meses_es))
+or_tab     <- read_csv("salidas/etapa3_odds_ratios.csv", show_col_types = FALSE)
+imp_gam    <- read_csv("salidas/etapa3_importancia_gam.csv", show_col_types = FALSE) |> rename(dRMSE = 2)
+imp_gee    <- read_csv("salidas/etapa3_importancia_logistica.csv", show_col_types = FALSE) |> rename(dAUC = 2)
+
+# nivel de PM2.5 sin y con ajuste por meteorología (G0 vs G1), columnas por posición
+tab_norm <- mods$nivel_ajustado |>
+  rename(estacion = 1, obs = 2, g0 = 3, g1 = 4, li = 5, ls = 6, cambio = 7, r0 = 8, r1 = 9)
+
+tibble(Objeto = c("Estaciones del periodo común", "Estación-días de entrenamiento (GAM)",
+                  "Estación-días de validación (GAM)", "Días de validación (logística)"),
+       Valor = c(length(est_c), nrow(ins$train_g), nrow(ins$test_g), nrow(ins$test))) |>
+  kable(format.args = list(big.mark = ","), caption = "Verificación de la carga")
+```
+
+## 2.1 Ubicación de las estaciones
+
+Las coordenadas salen del documento «Ubicación de las estaciones de monitoreo» (SIMA, 2025) y se pasan de grados, minutos y segundos a grados decimales. Las tres estaciones que no entran al análisis (NTE, NE3, NO3) se dibujan en gris para dar contexto.
+
+```{r}
+#| label: coordenadas
+dms <- function(g, m, s) g + m / 60 + s / 3600
+
+coords_est <- tribble(
+  ~estacion, ~lat,            ~lon,             ~msnm,
+  "SE",   dms(25, 39, 55), -dms(100, 14, 37), 500,
+  "NE",   dms(25, 44, 41), -dms(100, 15, 11), 474,
+  "CE",   dms(25, 40, 33), -dms(100, 20, 18), 562,
+  "NO",   dms(25, 45, 46), -dms(100, 22,  9), 568,
+  "SO",   dms(25, 40, 32), -dms(100, 27, 29), 674,
+  "NO2",  dms(25, 48,  1), -dms(100, 35,  4), 702,
+  "NTE",  dms(25, 47, 55), -dms(100, 19, 38), 503,
+  "NE2",  dms(25, 46, 38), -dms(100, 11, 17), 432,
+  "SE2",  dms(25, 38, 45), -dms(100,  5, 43), 387,
+  "SO2",  dms(25, 39, 54), -dms(100, 24, 46), 636,
+  "SE3",  dms(25, 36,  4), -dms( 99, 59, 57), 334,
+  "SUR",  dms(25, 37,  1), -dms(100, 16, 26), 555,
+  "NTE2", dms(25, 43, 47), -dms(100, 18, 36), 520,
+  "NE3",  dms(25, 47, 26), -dms(100,  4, 42), 346,
+  "NO3",  dms(25, 46,  6), -dms(100, 27, 49), 607
+)
+
+# función de mapa reutilizable: d debe traer estacion, lat, lon y la variable a pintar.
+# El mapa base usa mosaicos de OpenStreetMap (no requieren clave). Si la descarga falla,
+# la función dibuja el mapa sin fondo en lugar de detener el documento.
+mapa_est <- function(d, var, titulo, tipo = c("continuo", "grupo", "divergente"), leyenda = NULL,
+                     tile = "osm") {
+  tipo <- match.arg(tipo)
+  sf_d <- st_as_sf(d, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+  sf_o <- st_as_sf(coords_est |> filter(!estacion %in% est_c), coords = c("lon", "lat"), crs = 4326)
+
+  arma <- function(con_base) {
+    p <- ggplot()
+    if (con_base) p <- p + annotation_map_tile(type = tile, zoom = 10, progress = "none")
+    p <- p +
+      geom_sf(data = sf_o, shape = 21, size = 4, fill = "grey85", colour = "grey55") +
+      geom_sf(data = sf_d, aes(fill = .data[[var]]), shape = 21, size = 9, colour = "white", stroke = 1.3) +
+      geom_text_repel(data = sf_d, aes(label = estacion, geometry = geometry), stat = "sf_coordinates",
+                      size = 5, fontface = "bold", box.padding = 0.6, min.segment.length = 0, seed = 2026,
+                      bg.color = "white", bg.r = 0.15) +
+      # default_crs = 4326: los límites y las etiquetas están en grados (lon/lat), aunque el mapa base use metros
+      coord_sf(default_crs = sf::st_crs(4326), xlim = c(-100.66, -99.95), ylim = c(25.56, 25.85), expand = FALSE) +
+      theme_void(base_size = 16) +
+      theme(legend.position = "bottom", legend.key.width = unit(2.2, "cm"),
+            plot.title = element_text(face = "bold", colour = pal$verde_osc),
+            plot.caption = element_text(colour = "grey40", size = 10))
+    p + switch(tipo,
+      grupo      = scale_fill_manual(values = pal_grupo, labels = etq_grupo, name = NULL),
+      continuo   = scale_fill_gradientn(colours = c(pal$verde, "#F4E3A3", pal$rojo), name = leyenda),
+      divergente = scale_fill_gradient2(low = pal$azul, mid = "white", high = pal$rojo, midpoint = 0, name = leyenda)) +
+      labs(title = titulo, caption = if (con_base) "Mapa base: © colaboradores de OpenStreetMap" else NULL)
+  }
+
+  p <- arma(usar_mapa_base)
+  if (usar_mapa_base) {
+    # la descarga de mosaicos ocurre al construir el gráfico: se prueba aquí para poder recuperarse
+    ok <- tryCatch({ ggplotGrob(p); TRUE }, error = \(e) { message("Mapa base no disponible: ", conditionMessage(e)); FALSE })
+    if (!ok) p <- arma(FALSE)
+  }
+  p
+}
+```
+
+# 3. Ranking de estaciones (modelo lineal con errores AR(1) + bootstrap por bloques)
+
+**De dónde viene.** Para cada contaminante, `log(PM) ~ estación + mes` con errores AR(1) (`nlme::gls`; Pinheiro & Bates, 2000), 2021–2023, 12 estaciones. Los intervalos y las posiciones salen de un bootstrap que remuestrea semanas completas con todas las estaciones juntas (Künsch, 1989). Aquí solo se leen los resultados ya calculados en `etapa3_orden_bootstrap.csv` y `etapa3_emmeans_mes.csv`.
+
+## 3.1 Nivel y posición por estación
+
+Cada punto es la media aritmética diaria con su IC al 95 %, coloreada por grupo; la etiqueta es la posición mediana en el bootstrap (1 = menor exposición). Las más limpias quedan arriba.
+
+```{r}
+#| label: ranking
+#| fig-width: 14
+#| fig-height: 6
+ranking_plot <- function(v, titulo) {
+  d <- orden_boot |> filter(Contaminante == v) |>
+    left_join(grupos |> select(estacion, grupo), by = "estacion") |>
+    mutate(estacion = fct_reorder(estacion, media, .desc = TRUE))
+  ggplot(d, aes(media, estacion, colour = grupo)) +
+    geom_pointrange(aes(xmin = media_LI, xmax = media_LS), linewidth = 0.9, size = 0.7) +
+    geom_text(aes(x = media_LS, label = sprintf("pos. %.0f", rango_med)),
+              hjust = -0.25, size = 4, colour = pal$gris, show.legend = FALSE) +
+    scale_colour_manual(values = pal_grupo, labels = etq_grupo, name = NULL) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+    labs(x = "Media diaria (µg/m³) con IC 95 %", y = NULL, title = titulo)
+}
+
+p_rank <- ranking_plot("PM25", "PM2.5") + ranking_plot("PM10", "PM10") +
+  plot_layout(guides = "collect") & theme(legend.position = "bottom")
+guarda_fig(p_rank, "01_ranking_pm25_pm10", w = 14, h = 6)
+```
+
+## 3.2 Días sobre la norma y la guía de la OMS (PM2.5)
+
+Porcentaje de días por estación que superan la guía de 24 h de la OMS (15 µg/m³; World Health Organization, 2021) y la NOM-025-SSA1 vigente cada año (45, 41 y 41 µg/m³ en 2021–2023; Secretaría de Salud, 2021), con IC por bootstrap por bloques.
+
+```{r}
+#| label: excedencias
+#| fig-width: 10
+#| fig-height: 6.5
+orden_pm25 <- orden_boot |> filter(Contaminante == "PM25") |> arrange(desc(media)) |> pull(estacion)
+
+exc <- orden_boot |> filter(Contaminante == "PM25") |>
+  select(estacion, oms_pt = oms, oms_LI, oms_LS, nom_pt = nom, nom_LI, nom_LS) |>
+  pivot_longer(-estacion, names_to = c("norma", ".value"), names_pattern = "(oms|nom)_(pt|LI|LS)") |>
+  mutate(norma = recode(norma, oms = "Guía OMS (15 µg/m³)", nom = "NOM-025-SSA1 vigente"),
+         estacion = factor(estacion, levels = orden_pm25))
+
+p_exc <- ggplot(exc, aes(pt, estacion, fill = norma)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_linerange(aes(xmin = LI, xmax = LS), position = position_dodge(0.8), colour = pal$gris) +
+  scale_fill_manual(values = c("Guía OMS (15 µg/m³)" = pal$verde_cl, "NOM-025-SSA1 vigente" = pal$verde_osc), name = NULL) +
+  labs(x = "% de días sobre el límite (IC 95 %)", y = NULL, title = "Días sobre el límite, PM2.5, 2021–2023")
+guarda_fig(p_exc, "02_excedencias_pm25", h = 6.5)
+```
+
+## 3.3 Estacionalidad: peor y mejor mes
+
+Media geométrica estimada por mes (controlando estación) con IC al 95 %. Se marcan el mes más alto y el más bajo de cada contaminante.
+
+```{r}
+#| label: meses
+#| fig-width: 12
+#| fig-height: 5
+extremos <- emm_mes |> group_by(Contaminante) |>
+  filter(media %in% c(max(media), min(media))) |> ungroup()
+
+p_mes <- ggplot(emm_mes, aes(mes, media, group = 1)) +
+  geom_ribbon(aes(ymin = LI, ymax = LS), fill = pal$verde_cl, alpha = 0.6) +
+  geom_line(colour = pal$verde_osc, linewidth = 1.3) + geom_point(colour = pal$verde_osc, size = 2.5) +
+  geom_point(data = extremos, colour = pal$rojo, size = 5) +
+  geom_text(data = extremos, aes(label = sprintf("%s: %.0f", mes, media)), vjust = -1.2, colour = pal$rojo, fontface = "bold") +
+  facet_wrap(~Contaminante, scales = "free_y") +
+  labs(x = NULL, y = "Media geométrica (µg/m³)", title = "Estacionalidad de PM2.5 y PM10, 2021–2023")
+guarda_fig(p_mes, "03_estacionalidad_mensual", w = 12, h = 5)
+```
+
+## 3.4 Ranking integral «mejor para vivir» (metodología nueva)
+
+La Etapa 3 deja pendiente un ordenamiento que combine PM2.5, PM10 y excedencias. Se propone un **índice integral** con cuatro indicadores por estación: PM2.5 medio, PM10 medio, % de días sobre la NOM para PM2.5 y % de días sobre la NOM para PM10. Cada indicador se estandariza entre estaciones (puntaje z) y el índice es el promedio ponderado de los cuatro (`pesos_indice`); 0 es el promedio de la red y valores menores son mejores.
+
+Para que el índice tenga incertidumbre, se repite el **mismo bootstrap por bloques** de la Etapa 3: en cada réplica se remuestrean semanas completas (año × semana ISO) con todas las estaciones juntas, se recalculan los cuatro indicadores, el índice y la posición de cada estación. Así el ordenamiento hereda la correlación entre estaciones vecinas.
+
+> **Decisión del equipo:** los pesos iguales y el uso de la NOM vigente cada año son supuestos de diseño. Hay que justificarlos en la exposición (por ejemplo, mostrando que el orden de los extremos no cambia si se pondera más el PM2.5).
+
+Primero se agregan los datos por celda semana × estación.
+
+```{r}
+#| label: ranking-integral-datos
+agrega_celdas <- function(v) {
+  lim_n <- lim_norma |> transmute(anio, lim_nom = .data[[paste0(v, "_24h")]])
+  datos_dia_c |>
+    mutate(estacion = as.character(estacion), cel = paste(anio, isoweek(dia))) |>
+    left_join(lim_n, by = "anio") |>
+    filter(!is.na(.data[[v]]), estacion %in% est_c) |>
+    group_by(cel, estacion) |>
+    summarise(s = sum(.data[[v]]), n = n(), e = sum(.data[[v]] > lim_nom), .groups = "drop")
+}
+a25 <- agrega_celdas("PM25"); a10 <- agrega_celdas("PM10")
+cels <- sort(unique(c(a25$cel, a10$cel)))
+
+# matriz celdas x estaciones de una columna (s = suma, n = días, e = días sobre la NOM)
+a_mat <- function(a, columna) {
+  m <- matrix(0, length(cels), length(est_c), dimnames = list(cels, est_c))
+  m[cbind(match(a$cel, cels), match(a$estacion, est_c))] <- a[[columna]]
+  m
+}
+S25 <- a_mat(a25, "s"); N25 <- a_mat(a25, "n"); E25 <- a_mat(a25, "e")
+S10 <- a_mat(a10, "s"); N10 <- a_mat(a10, "n"); E10 <- a_mat(a10, "e")
+
+# w = peso de cada celda (1 = datos originales; conteos del remuestreo en el bootstrap)
+indicadores <- function(w) {
+  rbind(media25 = drop(w %*% S25) / drop(w %*% N25),
+        media10 = drop(w %*% S10) / drop(w %*% N10),
+        nom25   = 100 * drop(w %*% E25) / drop(w %*% N25),
+        nom10   = 100 * drop(w %*% E10) / drop(w %*% N10))
+}
+indice <- function(ind) {
+  z <- t(apply(ind, 1, \(x) (x - mean(x)) / sd(x)))          # 4 x 12, puntaje z por indicador
+  colSums(z * pesos_indice[rownames(ind)]) / sum(pesos_indice)
+}
+
+ind0 <- indicadores(rep(1, length(cels)))
+idx0 <- indice(ind0)
+round(sort(idx0), 2)
+```
+
+Ahora el bootstrap (500 réplicas) y la tabla de resultados.
+
+```{r}
+#| label: ranking-integral-boot
+idx_b <- matrix(NA_real_, B_boot, length(est_c), dimnames = list(NULL, est_c))
+for (b in seq_len(B_boot)) {
+  w <- tabulate(sample.int(length(cels), length(cels), replace = TRUE), nbins = length(cels))
+  idx_b[b, ] <- indice(indicadores(w))
+}
+rk_b <- t(apply(idx_b, 1, rank))      # posición de cada estación en cada réplica (1 = mejor)
+
+rank_int <- tibble(
+  estacion  = est_c,
+  indice    = as.numeric(idx0[est_c]),
+  LI        = as.numeric(apply(idx_b, 2, quantile, probs = 0.025)),
+  LS        = as.numeric(apply(idx_b, 2, quantile, probs = 0.975)),
+  rango_med = as.numeric(apply(rk_b, 2, median)),
+  rango_LI  = as.numeric(apply(rk_b, 2, quantile, probs = 0.025)),
+  rango_LS  = as.numeric(apply(rk_b, 2, quantile, probs = 0.975)))
+write_csv(rank_int, "salidas/etapa4_ranking_integral.csv")
+
+tab_integral <- rank_int |>
+  left_join(grupos |> select(estacion, grupo), by = "estacion") |>
+  left_join(as_tibble(t(ind0), rownames = "estacion"), by = "estacion") |>
+  arrange(indice) |>
+  transmute(Pos = row_number(), Estación = estacion, Grupo = as.character(grupo),
+            `Índice (IC 95 %)` = sprintf("%.2f (%.2f a %.2f)", indice, LI, LS),
+            `Posición (IC 95 %)` = sprintf("%.0f (%.0f–%.0f)", rango_med, rango_LI, rango_LS),
+            `PM2.5` = round(media25, 1), PM10 = round(media10, 1),
+            `% NOM PM2.5` = round(nom25, 1), `% NOM PM10` = round(nom10, 1))
+guarda_tabla(tab_integral, "04_ranking_integral", "Ranking integral «mejor para vivir», 2021–2023")
+```
+
+Dos figuras para la diapositiva: el índice con su incertidumbre y el «semáforo» de los cuatro indicadores, que muestra por qué una estación queda donde queda (por ejemplo, SE3 es muy buena en PM2.5 pero no en PM10).
+
+```{r}
+#| label: ranking-integral
+#| fig-width: 14
+#| fig-height: 6.5
+p_idx <- rank_int |>
+  left_join(grupos |> select(estacion, grupo), by = "estacion") |>
+  mutate(estacion = fct_reorder(estacion, indice, .desc = TRUE)) |>
+  ggplot(aes(indice, estacion, colour = grupo)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(xmin = LI, xmax = LS), linewidth = 0.9, size = 0.7) +
+  geom_text(aes(x = LS, label = sprintf("pos. %.0f", rango_med)), hjust = -0.25, size = 4, colour = pal$gris, show.legend = FALSE) +
+  scale_colour_manual(values = pal_grupo, labels = etq_grupo, name = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+  labs(x = "Índice integral (menor = mejor; 0 = promedio de la red)", y = NULL, title = "Índice integral con IC 95 %")
+
+orden_idx <- rank_int$estacion[order(-rank_int$indice)]   # peor primero: queda abajo
+etq_ind <- c(media25 = "PM2.5 medio\n(µg/m³)", media10 = "PM10 medio\n(µg/m³)",
+             nom25 = "% días > NOM\nPM2.5", nom10 = "% días > NOM\nPM10")
+hm <- as_tibble(t(ind0), rownames = "estacion") |>
+  pivot_longer(-estacion, names_to = "indicador", values_to = "valor") |>
+  group_by(indicador) |> mutate(z = (valor - mean(valor)) / sd(valor)) |> ungroup() |>
+  mutate(indicador = factor(indicador, names(etq_ind), etq_ind), estacion = factor(estacion, orden_idx))
+
+p_hm <- ggplot(hm, aes(indicador, estacion, fill = z)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = sprintf("%.1f", valor)), size = 4.2) +
+  scale_fill_gradient2(low = pal$verde, mid = "white", high = pal$rojo, midpoint = 0, name = "vs. promedio de la red (z)") +
+  labs(x = NULL, y = NULL, title = "Indicadores por estación") + theme(panel.grid = element_blank())
+
+p_int <- p_idx + p_hm + plot_layout(widths = c(1.1, 1))
+guarda_fig(p_int, "05_ranking_integral", w = 14, h = 6.5)
+```
+
+## 3.5 Mapas
+
+Tres mapas con la ubicación real de las estaciones: los grupos de exposición, el índice integral y el efecto de la meteorología local (sección 5.3).
+
+```{r}
+#| label: mapas
+#| fig-width: 9
+#| fig-height: 6.5
+d_base <- coords_est |> filter(estacion %in% est_c)
+
+m1 <- mapa_est(d_base |> left_join(grupos |> select(estacion, grupo), by = "estacion"),
+               "grupo", "Grupos de exposición", "grupo")
+m2 <- mapa_est(d_base |> left_join(rank_int |> select(estacion, indice), by = "estacion"),
+               "indice", "Índice integral «mejor para vivir»", "continuo", "Índice (menor = mejor)")
+m3 <- mapa_est(d_base |> left_join(tab_norm |> select(estacion, cambio), by = "estacion"),
+               "cambio", "PM2.5 con meteorología común vs. observado", "divergente", "Cambio (%)")
+
+guarda_fig(m1, "06_mapa_grupos", w = 9, h = 6.5)
+guarda_fig(m2, "07_mapa_indice_integral", w = 9, h = 6.5)
+guarda_fig(m3, "08_mapa_efecto_meteorologia", w = 9, h = 6.5)
+```
+
+## 3.6 ¿Cumplen la norma? Percentil 99 y la norma de 2026
+
+La NOM-025-SSA1-2021 evalúa el límite de 24 h con el **percentil 99** anual, no con el número de días excedidos (Secretaría de Salud, 2021). Se calcula el P99 por estación y año (aproximando el procedimiento de la norma con el percentil tipo 1 y exigiendo al menos 75 % de días) y se compara con el límite de ese año. Con la validación 2024–2025 se agrega qué pasaría con el límite de 25 µg/m³ que rige desde 2026 (Instituto Nacional de Ecología y Cambio Climático [INECC], s. f.). El 2025 debe leerse con cautela por el cambio de equipos.
+
+```{r}
+#| label: norma-p99
+p99 <- datos_dia |>
+  mutate(estacion = as.character(estacion)) |>
+  filter(estacion %in% est_c, anio %in% 2022:2025, !is.na(PM25)) |>
+  group_by(estacion, anio) |>
+  summarise(n = n(), P99 = round(unname(quantile(PM25, 0.99, type = 1))), .groups = "drop") |>
+  filter(n >= 0.75 * 365) |>
+  left_join(lim_norma |> select(anio, lim = PM25_24h), by = "anio") |>
+  mutate(celda = sprintf("%.0f (%s)", P99, if_else(P99 <= lim, "cumple", "excede")))
+
+tab_p99 <- p99 |>
+  pivot_wider(id_cols = estacion, names_from = anio, values_from = celda) |>
+  mutate(estacion = factor(estacion, rev(orden_pm25))) |> arrange(estacion) |>
+  rename(`Estación` = estacion) |> mutate(`Estación` = as.character(`Estación`)) |>
+  rename_with(\(x) paste0(x, " (", lim_norma$PM25_24h[match(as.numeric(x), lim_norma$anio)], ")"), .cols = -1)
+guarda_tabla(tab_p99, "09_p99_pm25_por_anio", "P99 de PM2.5 y cumplimiento (entre paréntesis del año: límite en µg/m³)")
+```
+
+```{r}
+#| label: norma-2026
+esc_norma <- datos_dia |>
+  mutate(estacion = as.character(estacion)) |>
+  filter(estacion %in% est_c, anio %in% 2024:2025, !is.na(PM25)) |>
+  group_by(Estación = estacion) |>
+  summarise(Días = n(), `% > 33 (norma 2024–25)` = 100 * mean(PM25 > 33),
+            `% > 25 (norma desde 2026)` = 100 * mean(PM25 > 25), .groups = "drop") |>
+  filter(Días >= 30) |> arrange(`% > 25 (norma desde 2026)`) |>
+  mutate(across(where(is.numeric) & !Días, \(x) round(x, 1)))
+guarda_tabla(esc_norma, "10_escenario_norma_2026", "Días de PM2.5 sobre 33 y sobre 25 µg/m³, 2024–2025")
+```
+
+# 4. Resultado 1: grupos de exposición (PCA + conglomerados + bootstrap)
+
+**De dónde viene.** El perfil mensual de cada estación (log de la media mensual de PM2.5 y PM10: 12 estaciones × 24 variables, 2021–2023) se estandariza y se resume con PCA; los componentes retenidos (2, por la vara quebrada; Jackson, 1993) se agrupan con Ward y k-medias. Como solo hay 12 estaciones, no se hace una prueba de hipótesis sino una evaluación de **estabilidad** por bootstrap por bloques y por replicación con perfiles anuales (Hennig, 2007).
+
+## 4.1 Plano de los dos primeros componentes
+
+Cada estación coloreada por su grupo. PC1 es un eje de **nivel general** de partículas (sus 24 cargas son positivas y similares) y PC2 contrasta partículas finas (PM2.5) con gruesas (PM10).
+
+```{r}
+#| label: pca
+#| fig-width: 9
+#| fig-height: 6
+ve <- 100 * mods$pca$sdev^2 / sum(mods$pca$sdev^2)
+sc <- as_tibble(mods$pca$x[, 1:2], rownames = "estacion") |>
+  left_join(grupos |> select(estacion, grupo), by = "estacion")
+
+p_pca <- ggplot(sc, aes(PC1, PC2, colour = grupo, label = estacion)) +
+  geom_hline(yintercept = 0, colour = "grey85") + geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(size = 5) +
+  geom_text_repel(size = 5.5, fontface = "bold", show.legend = FALSE, seed = 2026) +
+  scale_colour_manual(values = pal_grupo, labels = etq_grupo, name = NULL) +
+  labs(x = sprintf("PC1 (%.1f %%): nivel general de partículas", ve[1]),
+       y = sprintf("PC2 (%.1f %%): finas vs. gruesas", ve[2]),
+       title = "Estaciones en el plano de los dos primeros componentes")
+guarda_fig(p_pca, "11_pca_plano", w = 9, h = 6)
+```
+
+## 4.2 Dendrograma
+
+El corte en tres grupos sobre el dendrograma de Ward. Se guarda con gráficos base de R (por eso se abre y se cierra el dispositivo `png`).
+
+```{r}
+#| label: dendro
+Z  <- mods$pca$x[, 1:2]
+hc <- hclust(dist(Z), method = "ward.D2")
+dibuja_dendro <- function() {
+  par(mar = c(2, 4, 2, 1))
+  plot(hc, hang = -1, main = "Dendrograma (Ward) sobre los componentes principales", xlab = "", sub = "")
+  rect.hclust(hc, k = 3, border = pal$rojo)
+}
+png(file.path(dir_fig, "12_dendrograma.png"), width = 2400, height = 1350, res = 250)
+dibuja_dendro(); invisible(dev.off())
+dibuja_dendro()
+```
+
+## 4.3 ¿Cuántos grupos? La silueta no decide
+
+El ancho medio de silueta (Rousseeuw, 1987) es parecido entre k = 2 y k = 5, por debajo de 0.5 (estructura de débil a moderada). Esta figura muestra con honestidad por qué la elección de k = 3 se apoya también en la interpretación y en la estabilidad de los extremos, y no solo en este criterio.
+
+```{r}
+#| label: silueta
+#| fig-width: 8
+#| fig-height: 5
+p_sil <- ins$sil_k |>
+  pivot_longer(-k, names_to = "metodo", values_to = "silueta") |>
+  mutate(metodo = str_remove(metodo, "Silueta ")) |>
+  ggplot(aes(k, silueta, colour = metodo)) +
+  geom_vline(xintercept = 3, colour = "grey85", linewidth = 6) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 1.3) + geom_point(size = 3.5) +
+  scale_colour_manual(values = c("Ward" = pal$verde_osc, "k-medias" = pal$ambar), name = NULL) +
+  scale_y_continuous(limits = c(0.3, 0.55)) +
+  labs(x = "Número de grupos (k)", y = "Ancho medio de silueta",
+       title = "Ningún k destaca con claridad", subtitle = "Línea punteada: 0.5")
+guarda_fig(p_sil, "13_silueta", w = 8, h = 5)
+```
+
+## 4.4 Estabilidad: extremos sólidos, grupo intermedio frágil
+
+Para cada estación, el porcentaje de réplicas del bootstrap en que queda junto a sus compañeras de grupo original. El subtítulo trae el ARI mediano entre los grupos de cada réplica y los originales.
+
+```{r}
+#| label: estab
+#| fig-width: 9
+#| fig-height: 5.5
+d_est <- ins$estab |> mutate(grupo = factor(grupo)) |>
+  arrange(grupo, desc(estabilidad)) |> mutate(estacion = fct_inorder(estacion))
+
+p_estab <- ggplot(d_est, aes(estacion, 100 * estabilidad, fill = grupo)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = sprintf("%.0f", 100 * estabilidad)), vjust = -0.4, size = 4.2) +
+  scale_fill_manual(values = pal_grupo, labels = etq_grupo, name = NULL) +
+  scale_y_continuous(limits = c(0, 108), expand = c(0, 0)) +
+  labs(x = NULL, y = "% de réplicas con sus compañeras de grupo",
+       title = "Estabilidad de cada estación en su grupo",
+       subtitle = sprintf("ARI mediano contra los grupos originales: %.2f", median(ins$ari_b)))
+guarda_fig(p_estab, "14_estabilidad_bootstrap", w = 9, h = 5.5)
+```
+
+## 4.5 Perfil mensual por grupo
+
+Las líneas delgadas son las estaciones; las gruesas, el promedio de cada grupo. Los grupos difieren sobre todo en **nivel**, no en forma estacional.
+
+```{r}
+#| label: perfil
+#| fig-width: 10
+#| fig-height: 5.5
+perf <- datos_dia_c |>
+  mutate(estacion = as.character(estacion), mes = factor(as.character(mes_lab), meses_es)) |>
+  group_by(estacion, mes) |> summarise(PM25 = mean(PM25, na.rm = TRUE), .groups = "drop") |>
+  left_join(grupos |> select(estacion, grupo), by = "estacion")
+perf_g <- perf |> group_by(grupo, mes) |> summarise(PM25 = mean(PM25), .groups = "drop")
+
+p_perf <- ggplot(perf, aes(mes, PM25, colour = grupo)) +
+  geom_line(aes(group = estacion), alpha = 0.35, linewidth = 0.6) +
+  geom_line(data = perf_g, aes(group = grupo), linewidth = 1.8) +
+  scale_colour_manual(values = pal_grupo, labels = etq_grupo, name = NULL) +
+  labs(x = NULL, y = "PM2.5 medio (µg/m³)", title = "Perfil mensual de PM2.5 por grupo, 2021–2023")
+guarda_fig(p_perf, "15_perfil_mensual_grupos", w = 10, h = 5.5)
+```
+
+## 4.6 ¿Se mantienen los grupos en otros años?
+
+Los perfiles anuales se proyectan en el PCA ya calculado y se pregunta si cada estación conserva su grupo. El descenso en 2025 coincide con el cambio de equipos (PM2.5 y bombas de los BAM de PM10) informado por el socio formador, por lo que ese año no sirve por ahora para validar; es una hipótesis pendiente de confirmar con las fechas de instalación.
+
+```{r}
+#| label: replicacion
+#| fig-width: 8
+#| fig-height: 5
+rep_a <- ins$rep_tab |> filter(!is.na(grupo_orig), anio >= 2021) |>
+  group_by(anio) |> summarise(n = n(), pct = 100 * mean(coincide), .groups = "drop") |>
+  mutate(nota = if_else(anio %in% c(2021, 2025), "Cambio de equipos", "Sin cambio"))
+
+p_rep <- ggplot(rep_a, aes(factor(anio), pct, fill = nota)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.0f %%\n(n = %d)", pct, n)), vjust = -0.3, size = 4.2) +
+  scale_fill_manual(values = c("Sin cambio" = pal$verde_osc, "Cambio de equipos" = pal$ambar), name = NULL) +
+  scale_y_continuous(limits = c(0, 118), expand = c(0, 0)) +
+  labs(x = NULL, y = "% de estaciones que conservan su grupo", title = "Replicación de los grupos por año")
+guarda_fig(p_rep, "16_replicacion_por_anio", w = 8, h = 5)
+```
+
+## 4.7 Tabla de grupos
+
+```{r}
+#| label: tab-grupos
+tab_grupos <- grupos |>
+  left_join(ins$estab |> select(estacion, estabilidad), by = "estacion") |>
+  group_by(Grupo = grupo) |>
+  summarise(Estaciones = paste(estacion, collapse = ", "), n = n(),
+            `PM2.5 medio` = round(mean(PM25_medio), 1), `PM10 medio` = round(mean(PM10_medio), 1),
+            `Estabilidad (%)` = round(100 * mean(estabilidad, na.rm = TRUE)), .groups = "drop") |>
+  mutate(Grupo = as.character(Grupo))
+guarda_tabla(tab_grupos, "17_tabla_grupos", "Grupos de exposición (2021–2023)")
+```
+
+# 5. Resultado 2: qué explica el PM2.5 y qué cambia con el clima (GAM)
+
+**De dónde viene.** Modelo aditivo generalizado con respuesta Gamma y enlace logarítmico, estimado con `mgcv::bam` (Wood, 2017) y errores AR(1), siguiendo AirGAM (Walker et al., 2023). Se comparan tres modelos nidados, entrenados con 2021–2023 y validados con 2024–2025:
+
+- **G0:** estación + día de la semana + día del año (base cíclica).
+- **G1:** G0 + términos suaves de temperatura, humedad, viento, lluvia y radiación.
+- **G2:** G1 + NO2 y CO.
+
+El mismo modelo responde dos preguntas: cuánto explica la meteorología (G0 → G1 → G2) y cómo cambia el nivel de cada estación bajo un clima común (G1 vs G0).
+
+## 5.1 ¿Cuánto explican la meteorología y los gases?
+
+La figura muestra el r² (correlación al cuadrado entre lo observado y lo predicho) **en validación**, no la devianza de entrenamiento. Estación y calendario solos dan un r² bajo; la meteorología y los gases suman el resto. Conviene presentarlo así: el modelo completo llega a cerca de 0.40, pero la contribución de meteorología y gases es la **diferencia** entre barras, no el 40 % completo.
+
+```{r}
+#| label: explicada-pm25
+#| fig-width: 9
+#| fig-height: 5
+val_gam <- mods$validacion
+vg25 <- val_gam |> filter(Modelo %in% c("G0", "G1", "G2", "RF")) |>
+  mutate(Contaminante = "PM2.5", r2 = r^2)
+etq_mod <- c(G0 = "Estación y\ncalendario", G1 = "+ meteorología", G2 = "+ NO2 y CO", RF = "Bosque aleatorio\n(referencia)")
+
+plot_explicada <- function(d, titulo) {
+  d |> mutate(modelo = factor(Modelo, names(etq_mod), etq_mod)) |>
+    ggplot(aes(modelo, r2, fill = Modelo == "G2")) +
+    geom_col(width = 0.7) +
+    geom_text(aes(label = sprintf("%.2f", r2)), vjust = -0.4, size = 5) +
+    facet_wrap(~Contaminante, scales = "free_x") +
+    scale_fill_manual(values = c("TRUE" = pal$verde_osc, "FALSE" = pal$verde_cl), guide = "none") +
+    scale_y_continuous(limits = c(0, 0.6), expand = c(0, 0)) +
+    labs(x = NULL, y = "r² en validación 2024–2025", title = titulo)
+}
+guarda_fig(plot_explicada(vg25, "Variación diaria de PM2.5 explicada en validación"), "18_explicada_pm25", w = 9, h = 5)
+```
+
+## 5.2 Forma de las relaciones: curvas parciales
+
+Cada curva es el factor por el que se multiplica el PM2.5 esperado al cambiar **solo** esa variable (1 = sin efecto), con su banda al 95 %. Se calculan con `predict(type = "terms")` dejando las demás variables en su mediana. Para la diapositiva principal se sugieren NO2, temperatura y viento (esta última atiende directamente la inquietud del socio formador); las otras dos van al anexo.
+
+```{r}
+#| label: curvas
+#| fig-width: 14
+#| fig-height: 8
+curva_gam <- function(m, d, var, term, inv = identity, n = 200) {
+  rng <- quantile(d[[var]], c(0.005, 0.995), na.rm = TRUE)
+  nd <- d[rep(1, n), , drop = FALSE]
+  for (v in names(nd)) if (is.numeric(nd[[v]])) nd[[v]] <- median(d[[v]], na.rm = TRUE)
+  nd[[var]] <- seq(rng[[1]], rng[[2]], length.out = n)
+  pr <- predict(m, newdata = nd, type = "terms", terms = term, se.fit = TRUE)
+  f <- pr$fit[, term]; se <- pr$se.fit[, term]
+  tibble(x = inv(nd[[var]]), efecto = exp(f), li = exp(f - 1.96 * se), ls = exp(f + 1.96 * se))
+}
+
+train_g <- ins$train_g; test_g <- ins$test_g
+g2 <- mods$gam$G2
+curvas <- bind_rows(
+  curva_gam(g2, train_g, "lNO2", "s(lNO2)", expm1) |> mutate(variable = "NO2 (ppb)"),
+  curva_gam(g2, train_g, "TOUT", "s(TOUT)")        |> mutate(variable = "Temperatura (°C)"),
+  curva_gam(g2, train_g, "WSR",  "s(WSR)")         |> mutate(variable = "Viento (km/h)"),
+  curva_gam(g2, train_g, "RH",   "s(RH)")          |> mutate(variable = "Humedad (%)"),
+  curva_gam(g2, train_g, "lCO",  "s(lCO)", expm1)  |> mutate(variable = "CO (ppm)"))
+
+plot_curvas <- function(d, ncol) {
+  ggplot(d, aes(x, efecto)) +
+    geom_hline(yintercept = 1, colour = "grey60") +
+    geom_ribbon(aes(ymin = li, ymax = ls), fill = pal$verde_cl, alpha = 0.7) +
+    geom_line(colour = pal$verde_osc, linewidth = 1.4) +
+    facet_wrap(~variable, scales = "free_x", ncol = ncol) +
+    labs(x = NULL, y = "Factor sobre el PM2.5\n(1 = sin efecto)")
+}
+principales <- c("NO2 (ppb)", "Temperatura (°C)", "Viento (km/h)")
+p_c3 <- plot_curvas(curvas |> filter(variable %in% principales) |>
+                      mutate(variable = factor(variable, principales)), 3) +
+  labs(title = "Cómo cambia el PM2.5 con NO2, temperatura y viento (GAM G2)")
+p_c5 <- plot_curvas(curvas, 3) + labs(title = "Curvas parciales del GAM G2 (anexo)")
+guarda_fig(p_c3, "19_curvas_principales", w = 14, h = 4.8)
+guarda_fig(p_c5, "20_curvas_anexo", w = 14, h = 8)
+```
+
+## 5.3 La pregunta del socio: nivel de cada estación con el mismo clima
+
+Para cada estación se compara su PM2.5 **sin ajuste** (G0, círculo hueco) con su PM2.5 bajo la **misma meteorología y calendario** que el resto de la red (G1, círculo lleno). Si la flecha sube, el clima local de esa estación la favorecía; si baja, la perjudicaba. Esto separa lo que corresponde al clima de lo que no (fuentes cercanas o topografía).
+
+```{r}
+#| label: dumbbell
+#| fig-width: 10
+#| fig-height: 6
+dumbbell <- function(d, titulo, unidad = "PM2.5 (µg/m³)") {
+  d <- d |> mutate(sube = g1 > g0, estacion = fct_reorder(estacion, g1, .desc = TRUE))
+  ggplot(d) +
+    geom_segment(aes(x = g0, xend = g1, y = estacion, yend = estacion, colour = sube),
+                 linewidth = 1.6, alpha = 0.75, arrow = arrow(length = unit(0.12, "in"))) +
+    geom_point(aes(g0, estacion), shape = 21, fill = "white", colour = pal$gris, size = 4.5, stroke = 1.2) +
+    geom_point(aes(g1, estacion), colour = pal$verde_osc, size = 4.5) +
+    geom_text(aes(x = pmax(g0, g1), y = estacion, label = sprintf("%+.0f %%", 100 * (g1 / g0 - 1))),
+              hjust = -0.4, size = 4.2) +
+    scale_colour_manual(values = c("TRUE" = pal$rojo, "FALSE" = pal$azul),
+                        labels = c("TRUE" = "Sube con clima común (su clima la favorecía)",
+                                   "FALSE" = "Baja con clima común (su clima la perjudicaba)"), name = NULL) +
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    guides(colour = guide_legend(nrow = 2)) +
+    labs(x = unidad, y = NULL, title = titulo, subtitle = "Círculo hueco: sin ajuste (G0). Círculo lleno: misma meteorología (G1).")
+}
+p_dum25 <- dumbbell(tab_norm, "PM2.5 observado vs. con meteorología común")
+guarda_fig(p_dum25, "21_nivel_ajustado_pm25", w = 10, h = 6)
+```
+
+## 5.4 Qué variables pesan más
+
+Cuánto empeora el error de validación (RMSE, en µg/m³) al quitar cada término del GAM G2. Es la medida de importancia más defendible del GAM porque se evalúa fuera del periodo de entrenamiento.
+
+```{r}
+#| label: importancia
+#| fig-width: 8
+#| fig-height: 5
+p_imp <- imp_gam |>
+  mutate(variable = fct_reorder(unname(etq_var[Variable]), dRMSE)) |>
+  ggplot(aes(dRMSE, variable)) +
+  geom_col(fill = pal$verde_osc, width = 0.7) +
+  geom_text(aes(label = sprintf("%.2f", dRMSE)), hjust = -0.2, size = 4.5) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(x = "Aumento del RMSE al quitar la variable (µg/m³)", y = NULL,
+       title = "Importancia de las variables en el GAM (PM2.5)")
+guarda_fig(p_imp, "22_importancia_gam_pm25", w = 8, h = 5)
+```
+
+## 5.5 Extensión a PM10
+
+El socio formador pidió explícitamente PM10, y el ranking integral de la sección 3.4 usa ambos contaminantes. Hasta ahora el GAM solo existía para PM2.5, por lo que se ajusta el **mismo GAM (G0, G1, G2)** para PM10, con las mismas variables, las mismas bases cíclicas, la misma partición temporal y los mismos días (casos completos), de modo que los resultados sean comparables.
+
+> **Qué no se extiende y por qué.** La regresión logística de días críticos se mantiene solo para PM2.5: el umbral de 33 µg/m³ define un evento minoritario, mientras que un umbral equivalente de PM10 (60 µg/m³ desde 2024) lo superaría una fracción mucho mayor de los días y dejaría de ser un «día crítico». Si el equipo quiere explorarla, bastaría con repetir la sección 6 con un umbral mayor, a decidir con el socio formador.
+
+Se redefinen las funciones del modelado (copiadas de `3_Modelado.qmd`, para que este documento sea autocontenido) y se preparan las bases. Las funciones deben ser idénticas a las usadas para PM2.5.
+
+```{r}
+#| label: pm10-funciones
+usa_wd <- isTRUE(mods$usa_wd)
+nudos  <- mods$gam_nudos
+lag1   <- \(x) acf(x, lag.max = 1, plot = FALSE, na.action = na.pass)$acf[2]
+
+fix_ar <- function(d) {
+  d |> arrange(estacion, dia) |>
+    mutate(AR_start = estacion != lag(estacion, default = first(estacion)) |
+                      as.integer(dia - lag(dia, default = first(dia))) != 1L) |>
+    as.data.frame()
+}
+
+ajusta_gam <- function(f, d) {
+  base_args <- list(formula = f, data = d, family = Gamma(link = "log"),
+                    method = "fREML", select = TRUE, knots = nudos)
+  ajusta <- \(extra) do.call(bam, c(base_args, extra))
+
+  m0 <- tryCatch(ajusta(list(discrete = TRUE)), error = \(e) ajusta(list()))
+  r <- residuals(m0, type = "pearson"); i <- which(!d$AR_start)
+  rho <- cor(r[i], r[i - 1])
+
+  intentos <- list(list(discrete = TRUE, rho = rho, AR.start = d$AR_start),
+                   list(rho = rho, AR.start = d$AR_start))
+  m1 <- NULL
+  for (ex in intentos) { m1 <- tryCatch(ajusta(ex), error = \(e) NULL); if (!is.null(m1)) break }
+  if (is.null(m1)) { message("AR(1) no disponible: se usa el modelo sin AR(1)."); m1 <- m0; modo <- "sin AR(1)" } else modo <- "AR(1)"
+  m1$rho_ar1 <- rho; m1$modo <- modo; m1$r1_sin_ar <- tapply(r, d$estacion, lag1)
+  m1
+}
+
+nivel_normalizado <- function(m, d, B = B_boot) {
+  X  <- predict(m, newdata = d, type = "lpmatrix")
+  ie <- grep("^estacion", colnames(X))
+  niv <- function(b) exp(c(0, b[ie])) * mean(exp(X[, -ie, drop = FALSE] %*% b[-ie]))
+  bs  <- rmvn(B, coef(m), vcov(m))
+  sim <- apply(bs, 1, niv)
+  tibble(estacion = levels(d$estacion), nivel = niv(coef(m)),
+         LI = apply(sim, 1, quantile, 0.025), LS = apply(sim, 1, quantile, 0.975))
+}
+
+metricas_air <- function(o, p) tibble(
+  FAC2 = mean(p / o >= 0.5 & p / o <= 2), MB = mean(p - o), RMSE = sqrt(mean((p - o)^2)),
+  MAE = mean(abs(p - o)), r = cor(o, p), COE = 1 - sum(abs(p - o)) / sum(abs(o - mean(o))))
+
+# bases para PM10: mismos días que el GAM de PM2.5, quitando los que no tengan PM10
+train10 <- train_g |> filter(!is.na(PM10), PM10 > 0) |> fix_ar()
+test10  <- test_g  |> filter(!is.na(PM10), PM10 > 0) |> fix_ar()
+
+tibble(Conjunto = c("Entrenamiento 2021–2023", "Validación 2024–2025"),
+       `Días PM2.5` = c(nrow(train_g), nrow(test_g)), `Días PM10` = c(nrow(train10), nrow(test10))) |>
+  kable(format.args = list(big.mark = ","), caption = "Días disponibles para el GAM de PM10")
+```
+
+Se ajustan G0, G1 y G2 para PM10 (la parte más lenta del documento).
+
+```{r}
+#| label: pm10-ajuste
+base_g <- c("estacion", "dow", "s(doy, bs = 'cc', k = 20)")
+s_met  <- c("s(TOUT)", "s(RH)", "s(WSR)", "s(lluvia, k = 5)", "s(SR)", if (usa_wd) "s(WD, bs = 'cc', k = 8)")
+s_cont <- c("s(lNO2)", "s(lCO)")
+
+forms10 <- list(G0 = reformulate(base_g, "PM10"),
+                G1 = reformulate(c(base_g, s_met), "PM10"),
+                G2 = reformulate(c(base_g, s_met, s_cont), "PM10"))
+gam10 <- map(forms10, \(f) ajusta_gam(f, train10))
+
+imap_dfr(gam10, \(m, nm) tibble(Modelo = nm, `Devianza explicada (%)` = 100 * summary(m)$dev.expl,
+                                `rho estimado` = m$rho_ar1, Errores = m$modo)) |>
+  kable(digits = 3, caption = "GAM de PM10 (Gamma, enlace log) en entrenamiento 2021–2023")
+```
+
+Validación en 2024–2025, global y por año. En 2025 los BAM de PM10 recibieron bombas nuevas y la mediana de PM10 cayó cerca de 20 % sin cambio de clima; si el sesgo medio (MB) del modelo cambia de signo o crece en 2025, es una señal de ese efecto de instrumentación y **no** un fallo del GAM.
+
+```{r}
+#| label: pm10-validacion
+obs10  <- test10$PM10
+pred10 <- map(gam10, \(m) as.numeric(predict(m, newdata = test10, type = "response")))
+
+val10 <- imap_dfr(pred10, \(p, nm) bind_cols(Modelo = nm, metricas_air(obs10, p))) |>
+  mutate(Tipo = recode(Modelo, G0 = "Solo estación y calendario", G1 = "+ meteorología", G2 = "+ meteorología, NO2 y CO"),
+         .after = Modelo)
+kable(val10, digits = 3, caption = "PM10: validación 2024–2025 (µg/m³)")
+
+val10_anio <- map_dfr(sort(unique(test10$anio)), \(a) {
+  i <- test10$anio == a
+  bind_cols(Año = a, n = sum(i), metricas_air(obs10[i], pred10$G2[i]))
+})
+kable(val10_anio, digits = 3, caption = "PM10, GAM G2: validación por año")
+
+write_csv(val10, "salidas/etapa4_validacion_gam_pm10.csv")
+write_csv(val10_anio, "salidas/etapa4_validacion_gam_pm10_por_anio.csv")
+```
+
+Nivel de cada estación en PM10 con y sin ajuste por meteorología, con el mismo procedimiento que en PM2.5.
+
+```{r}
+#| label: pm10-nivel
+norm10_g0 <- nivel_normalizado(gam10$G0, train10)
+norm10_g1 <- nivel_normalizado(gam10$G1, train10)
+tab_norm10 <- norm10_g0 |> transmute(estacion, g0 = nivel) |>
+  left_join(norm10_g1 |> transmute(estacion, g1 = nivel, li = LI, ls = LS), by = "estacion") |>
+  mutate(cambio = 100 * (g1 / g0 - 1)) |> arrange(g1)
+write_csv(tab_norm10, "salidas/etapa4_nivel_ajustado_meteorologia_pm10.csv")
+saveRDS(list(gam10 = gam10, val10 = val10, val10_anio = val10_anio, tab_norm10 = tab_norm10),
+        "salidas/etapa4_gam_pm10.rds")
+
+p_dum10 <- dumbbell(tab_norm10, "PM10 observado vs. con meteorología común", "PM10 (µg/m³)")
+guarda_fig(p_dum10, "23_nivel_ajustado_pm10", w = 10, h = 6)
+```
+
+Figura comparativa de la sección 5.1 con los dos contaminantes.
+
+```{r}
+#| label: explicada-ambos
+#| fig-width: 12
+#| fig-height: 5
+vg10 <- val10 |> filter(Modelo %in% c("G0", "G1", "G2")) |> mutate(Contaminante = "PM10", r2 = r^2)
+p_expl <- plot_explicada(bind_rows(vg25, vg10), "Variación diaria explicada en validación (r²)")
+guarda_fig(p_expl, "24_explicada_pm25_pm10", w = 12, h = 5)
+```
+
+# 6. Resultado 3: días críticos (regresión logística con GEE)
+
+**De dónde viene.** Un día es crítico si su PM2.5 de 24 h supera 33 µg/m³ (límite de la NOM-025-SSA1-2021 en 2024–2025; Secretaría de Salud, 2021), con el mismo umbral en todos los años para que la definición sea igual en entrenamiento (2021–2023) y validación (2024–2025). El modelo es una regresión logística con ecuaciones de estimación generalizadas y correlación AR(1) dentro de cada estación (Liang & Zeger, 1986; Højsgaard et al., 2006). Controla estación y temporada, y usa las siete predictoras estandarizadas con la media y la desviación del entrenamiento.
+
+## 6.1 Capacidad de discriminar: curva ROC
+
+```{r}
+#| label: roc
+#| fig-width: 7
+#| fig-height: 6
+test <- ins$test; p_te <- ins$p_te; p_te_b <- ins$p_te_b; thr <- ins$thr
+roc_te <- roc(test$crit, p_te,   quiet = TRUE, direction = "<")
+roc_b  <- roc(test$crit, p_te_b, quiet = TRUE, direction = "<")
+
+p_roc <- ggroc(list("Modelo completo" = roc_te, "Solo estación y temporada" = roc_b),
+               legacy.axes = TRUE, linewidth = 1.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+  scale_colour_manual(values = c("Modelo completo" = pal$verde_osc, "Solo estación y temporada" = pal$ambar), name = NULL) +
+  annotate("text", x = 0.62, y = 0.18, hjust = 0, size = 5.5, colour = pal$verde_osc,
+           label = sprintf("AUC completo: %.2f", as.numeric(auc(roc_te)))) +
+  annotate("text", x = 0.62, y = 0.10, hjust = 0, size = 5.5, colour = pal$ambar,
+           label = sprintf("AUC base: %.2f", as.numeric(auc(roc_b)))) +
+  coord_equal() +
+  labs(x = "1 − especificidad", y = "Sensibilidad", title = "Curva ROC en validación 2024–2025")
+guarda_fig(p_roc, "25_roc", w = 7, h = 6)
+```
+
+## 6.2 Cuánto acierta como alerta
+
+Con el umbral de probabilidad de Youden calculado en entrenamiento, se arma la matriz de confusión en validación. La figura traduce las dos métricas que importan al socio: de los días críticos reales, cuántos detecta (sensibilidad); y de las alertas que emite, cuántas aciertan (precisión).
+
+```{r}
+#| label: alertas
+#| fig-width: 10
+#| fig-height: 4
+pred_c <- as.integer(p_te >= thr)
+tp <- sum(pred_c == 1 & test$crit == 1); fn <- sum(pred_c == 0 & test$crit == 1)
+tn <- sum(pred_c == 0 & test$crit == 0); fp <- sum(pred_c == 1 & test$crit == 0)
+
+met_log <- tibble(
+  Métrica = c("AUC modelo completo", "AUC modelo base (estación + temporada)", "Brier",
+              "Umbral de probabilidad (Youden, entrenamiento)", "Sensibilidad", "Especificidad",
+              "Precisión (valor predictivo positivo)", "Días críticos reales", "Alertas emitidas"),
+  Valor = c(as.numeric(auc(roc_te)), as.numeric(auc(roc_b)), mean((p_te - test$crit)^2), thr,
+            tp / (tp + fn), tn / (tn + fp), tp / (tp + fp), tp + fn, tp + fp))
+guarda_tabla(met_log |> mutate(Valor = round(Valor, 3)), "26_metricas_logistica", "Regresión logística: validación 2024–2025")
+
+d_alerta <- tribble(
+  ~medida,                  ~resultado,        ~n,
+  "De las alertas emitidas", "Día crítico real", tp,
+  "De las alertas emitidas", "Falsa alarma",     fp,
+  "De los días críticos",    "Detectado",        tp,
+  "De los días críticos",    "No detectado",     fn) |>
+  group_by(medida) |> mutate(p = n / sum(n)) |> ungroup()
+
+p_alerta <- ggplot(d_alerta, aes(p, medida, fill = resultado)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = percent(p, accuracy = 1)), position = position_stack(vjust = 0.5), colour = "white", fontface = "bold", size = 5.5) +
+  scale_fill_manual(values = c("Día crítico real" = pal$verde_osc, "Detectado" = pal$verde_osc,
+                               "Falsa alarma" = pal$rojo, "No detectado" = pal$rojo), name = NULL) +
+  scale_x_continuous(labels = percent, expand = c(0, 0)) +
+  labs(x = NULL, y = NULL, title = "Sirve para filtrar días de riesgo, aún no como aviso operativo")
+guarda_fig(p_alerta, "27_alertas_vs_detectados", w = 10, h = 4)
+```
+
+## 6.3 Qué variables se asocian con los días críticos
+
+Razones de momios por cada desviación estándar adicional, con IC al 95 % robusto; en color, las que no incluyen el 1. Se complementa con el cambio del AUC de validación al quitar cada variable.
+
+```{r}
+#| label: or
+#| fig-width: 9
+#| fig-height: 5
+p_or <- or_tab |>
+  mutate(variable = fct_reorder(unname(etq_var[Variable]), OR), sig = LI > 1 | LS < 1) |>
+  ggplot(aes(OR, variable, colour = sig)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_pointrange(aes(xmin = LI, xmax = LS), linewidth = 1, size = 0.8) +
+  scale_x_log10() +
+  scale_colour_manual(values = c("TRUE" = pal$verde_osc, "FALSE" = "grey60"), guide = "none") +
+  labs(x = "Razón de momios por 1 DE (escala log)", y = NULL,
+       title = "Variables asociadas con un día crítico de PM2.5")
+guarda_fig(p_or, "28_razones_de_momios", w = 9, h = 5)
+
+tab_log <- or_tab |> left_join(imp_gee |> select(Variable, dAUC), by = "Variable") |>
+  transmute(Variable = unname(etq_var[Variable]), `OR (IC 95 %)` = sprintf("%.2f (%.2f–%.2f)", OR, LI, LS),
+            `ΔAUC al quitarla` = round(dAUC, 3)) |> arrange(desc(parse_number(`OR (IC 95 %)`)))
+guarda_tabla(tab_log, "29_tabla_logistica", "Regresión logística: razones de momios e importancia")
+```
+
+## 6.4 Calibración
+
+Los deciles de probabilidad predicha frente a la frecuencia observada. La subestimación en probabilidades bajas y la sobreestimación en las altas son parte de la limitación que se declara.
+
+```{r}
+#| label: calibracion
+#| fig-width: 7
+#| fig-height: 5.5
+p_cal <- tibble(p = p_te, crit = test$crit) |>
+  mutate(decil = ntile(p, 10)) |>
+  group_by(decil) |> summarise(pred = mean(p), obs = mean(crit), .groups = "drop") |>
+  ggplot(aes(pred, obs)) +
+  geom_abline(linetype = "dashed", colour = "grey50") +
+  geom_line(colour = pal$verde_osc, linewidth = 1.2) + geom_point(colour = pal$verde_osc, size = 3.5) +
+  labs(x = "Probabilidad predicha", y = "Frecuencia observada", title = "Calibración en validación (por deciles)")
+guarda_fig(p_cal, "30_calibracion", w = 7, h = 5.5)
+```
+
+# 7. Contexto: el cambio de equipos en 2025
+
+Lo que cambia de un año a otro en la mediana de las estaciones respecto de su promedio 2021–2023. En 2025 el PM10 y el CO caen sin que cambien el viento ni la temperatura, lo que apunta a un efecto de instrumentación (analizadores de CO y bombas de los BAM de PM10), no a una mejora real de la calidad del aire. Es una hipótesis pendiente de confirmar con las fechas de instalación.
+
+```{r}
+#| label: cambio
+#| fig-width: 10
+#| fig-height: 5
+cam <- ins$cambio |>
+  group_by(anio) |>
+  summarise(across(c(`PM2.5 (%)`, `PM10 (%)`, `CO (%)`, `Viento (%)`), median), .groups = "drop") |>
+  pivot_longer(-anio, names_to = "variable", values_to = "cambio")
+
+p_cam <- ggplot(cam, aes(anio, cambio, colour = variable)) +
+  annotate("rect", xmin = 2024.5, xmax = 2025.5, ymin = -Inf, ymax = Inf, fill = pal$ambar, alpha = 0.2) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(linewidth = 1.3) + geom_point(size = 3) +
+  scale_colour_manual(values = c("PM2.5 (%)" = pal$verde_osc, "PM10 (%)" = pal$rojo, "CO (%)" = pal$ambar, "Viento (%)" = pal$azul), name = NULL) +
+  labs(x = NULL, y = "Cambio respecto de 2021–2023 (%)", title = "Cambios por año (mediana entre estaciones)",
+       subtitle = "Zona sombreada: 2025, año con equipos nuevos de PM2.5 y bombas nuevas en los BAM de PM10")
+guarda_fig(p_cam, "31_cambio_por_anio", w = 10, h = 5)
+```
+
+# 8. Diapositiva guía: de dónde sale cada resultado
+
+Esta tabla responde, para cada resultado, las cuatro preguntas que no se supieron contestar en la exposición: qué modelo, con qué variables, con qué datos y qué supuestos. Las cifras de métricas se calculan con los objetos de este documento; los supuestos vienen de la Tabla 6 del reporte de la Etapa 3.
+
+```{r}
+#| label: tab-modelos
+r2g <- setNames(vg25$r2, vg25$Modelo)
+mapa_modelos <- tribble(
+  ~Resultado, ~Modelo, ~`Variables`, ~Datos, ~`Supuestos verificados`, ~`Métrica clave`,
+  "Ranking de estaciones y meses",
+  "Modelo lineal con errores AR(1) + bootstrap por bloques",
+  "log(PM2.5) y log(PM10) ~ estación + mes",
+  "2021–2023, 12 estaciones",
+  "AR(1) elimina la autocorrelación; colas pesadas en los residuos (inferencia aproximada)",
+  "Posición de cada estación con IC 95 %",
+  "1. Grupos de exposición",
+  "PCA + Ward / k-medias + bootstrap",
+  "Perfil mensual: log de la media mensual de PM2.5 y PM10 (12 × 24)",
+  "2021–2023; réplica con perfiles anuales 2021–2025",
+  "No requiere normalidad; silueta 0.37–0.46 (débil); estabilidad por bootstrap",
+  sprintf("ARI mediano %.2f; extremos 100 %% estables", median(ins$ari_b)),
+  "2. Qué explica el PM2.5 y qué cambia con el clima",
+  "GAM Gamma (enlace log) con AR(1); G0, G1, G2",
+  "Estación, día de la semana, día del año, temperatura, humedad, viento, lluvia, radiación, NO2, CO",
+  "Entrena 2021–2023; valida 2024–2025",
+  "Residuos de devianza; concurvidad alta en temperatura y lluvia; k-index; AR(1)",
+  sprintf("r² en validación: %.2f → %.2f → %.2f", r2g[["G0"]], r2g[["G1"]], r2g[["G2"]]),
+  "3. Días críticos (PM2.5 > 33 µg/m³)",
+  "Regresión logística con GEE AR(1)",
+  "Día crítico ~ estación + temporada + 7 predictoras estandarizadas",
+  "Entrena 2021–2023; valida 2024–2025",
+  "Sin separación (temporada, no mes); NO2, CO y temperatura comparten información; calibración razonable",
+  sprintf("AUC %.2f; sensibilidad %.2f; precisión %.2f", as.numeric(auc(roc_te)), tp / (tp + fn), tp / (tp + fp)))
+guarda_tabla(mapa_modelos, "00_mapa_de_modelos", "De dónde sale cada resultado")
+```
+
+# 9. Archivos generados
+
+```{r}
+#| label: archivos
+list.files("presentacion", recursive = TRUE)
+```
+
+# Referencias
+
+Hennig, C. (2007). Cluster-wise assessment of cluster stability. *Computational Statistics & Data Analysis, 52*(1), 258–271. https://doi.org/10.1016/j.csda.2006.11.025
+
+Højsgaard, S., Halekoh, U., & Yan, J. (2006). The R package geepack for generalized estimating equations. *Journal of Statistical Software, 15*(2), 1–11. https://doi.org/10.18637/jss.v015.i02
+
+Instituto Nacional de Ecología y Cambio Climático. (s. f.). *Normas Oficiales Mexicanas (NOM) – Salud ambiental*. Sistema Nacional de Información de la Calidad del Aire. https://sinaica.inecc.gob.mx/pags/noms.php
+
+Jackson, D. A. (1993). Stopping rules in principal components analysis: A comparison of heuristical and statistical approaches. *Ecology, 74*(8), 2204–2214. https://doi.org/10.2307/1939574
+
+Künsch, H. R. (1989). The jackknife and the bootstrap for general stationary observations. *The Annals of Statistics, 17*(3), 1217–1241. https://doi.org/10.1214/aos/1176347265
+
+Liang, K.-Y., & Zeger, S. L. (1986). Longitudinal data analysis using generalized linear models. *Biometrika, 73*(1), 13–22. https://doi.org/10.1093/biomet/73.1.13
+
+Pinheiro, J. C., & Bates, D. M. (2000). *Mixed-effects models in S and S-PLUS*. Springer. https://doi.org/10.1007/b98882
+
+Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. *Journal of Computational and Applied Mathematics, 20*, 53–65. https://doi.org/10.1016/0377-0427(87)90125-7
+
+Sistema Integral de Monitoreo Ambiental. (2025). *Ubicación de estaciones de SIMA 2025* [Documento del reto]. Gobierno de Nuevo León.
+
+Secretaría de Salud. (2021, 27 de octubre). *NOM-025-SSA1-2021, Salud ambiental. Criterio para evaluar la calidad del aire ambiente, con respecto a las partículas suspendidas PM10 y PM2.5*. Diario Oficial de la Federación. https://sidof.segob.gob.mx/notas/docFuente/5633855
+
+Walker, S.-E., Solberg, S., Schneider, P., & Guerreiro, C. (2023). The AirGAM 2022r1 air quality trend and prediction model. *Geoscientific Model Development, 16*(2), 573–595. https://doi.org/10.5194/gmd-16-573-2023
+
+Wood, S. N. (2017). *Generalized additive models: An introduction with R* (2.ª ed.). CRC Press.
+
+World Health Organization. (2021). *WHO global air quality guidelines* (WHO/HEP/ECH/AQG/2021.1). World Health Organization.

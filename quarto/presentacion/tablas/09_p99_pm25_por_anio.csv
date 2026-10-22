@@ -1,0 +1,13 @@
+Estación,2022 (41),2023 (41),2024 (33),2025 (33)
+SUR,43 (excede),40 (cumple),43 (excede),36 (excede)
+SE3,41 (cumple),40 (cumple),45 (excede),38 (excede)
+SE,41 (cumple),36 (cumple),45 (excede),44 (excede)
+SO2,43 (excede),37 (cumple),43 (excede),40 (excede)
+NO2,53 (excede),41 (cumple),43 (excede),48 (excede)
+NTE2,45 (excede),45 (excede),47 (excede),38 (excede)
+NO,57 (excede),50 (excede),NA,NA
+NE,54 (excede),66 (excede),54 (excede),NA
+NE2,44 (excede),48 (excede),49 (excede),NA
+CE,55 (excede),58 (excede),65 (excede),52 (excede)
+SO,72 (excede),73 (excede),72 (excede),NA
+SE2,80 (excede),88 (excede),79 (excede),59 (excede)

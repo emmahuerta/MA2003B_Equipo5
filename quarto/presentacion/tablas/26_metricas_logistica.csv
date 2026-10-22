@@ -1,0 +1,10 @@
+Métrica,Valor
+AUC modelo completo,0.82
+AUC modelo base (estación + temporada),0.744
+Brier,0.084
+"Umbral de probabilidad (Youden, entrenamiento)",0.139
+Sensibilidad,0.656
+Especificidad,0.824
+Precisión (valor predictivo positivo),0.34
+Días críticos reales,878
+Alertas emitidas,1693

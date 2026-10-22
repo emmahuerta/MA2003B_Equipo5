@@ -7168,6 +7168,22 @@ Table: Cambio del AUC de validación al quitar cada predictora (más negativo = 
 <span id="cb78-18"><a href="#cb78-18" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;salidas/etapa3_modelos.rds&quot;</span>, <span class="at">compress =</span> <span class="st">&quot;xz&quot;</span>)</span></code><button title="Copiar al portapapeles" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </details>
 </div>
+<div class="cell">
+<details open class="code-fold">
+<summary>Código</summary>
+<div class="sourceCode cell-code" id="cb79"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb79-1"><a href="#cb79-1" aria-hidden="true" tabindex="-1"></a><span class="fu">saveRDS</span>(<span class="fu">list</span>(</span>
+<span id="cb79-2"><a href="#cb79-2" aria-hidden="true" tabindex="-1"></a>  <span class="co"># datos del GAM: sirven para extender el GAM a PM10 y para dibujar las curvas</span></span>
+<span id="cb79-3"><a href="#cb79-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">train_g =</span> train_g, <span class="at">test_g =</span> test_g, <span class="at">pred_gam =</span> pred_gam, <span class="at">obs =</span> obs,</span>
+<span id="cb79-4"><a href="#cb79-4" aria-hidden="true" tabindex="-1"></a>  <span class="co"># regresión logística en validación</span></span>
+<span id="cb79-5"><a href="#cb79-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">test =</span> test[, <span class="fu">c</span>(<span class="st">&quot;estacion&quot;</span>, <span class="st">&quot;dia&quot;</span>, <span class="st">&quot;anio&quot;</span>, <span class="st">&quot;crit&quot;</span>)],</span>
+<span id="cb79-6"><a href="#cb79-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">p_te =</span> <span class="fu">as.numeric</span>(p_te), <span class="at">p_te_b =</span> <span class="fu">as.numeric</span>(p_te_b), <span class="at">thr =</span> thr,</span>
+<span id="cb79-7"><a href="#cb79-7" aria-hidden="true" tabindex="-1"></a>  <span class="co"># grupos: estabilidad por bootstrap, replicación por año, silueta</span></span>
+<span id="cb79-8"><a href="#cb79-8" aria-hidden="true" tabindex="-1"></a>  <span class="at">estab =</span> estab, <span class="at">rep_tab =</span> rep_tab, <span class="at">sil_k =</span> sil_k, <span class="at">ari_b =</span> ari_b,</span>
+<span id="cb79-9"><a href="#cb79-9" aria-hidden="true" tabindex="-1"></a>  <span class="co"># cambio de cada año respecto de 2021-2023</span></span>
+<span id="cb79-10"><a href="#cb79-10" aria-hidden="true" tabindex="-1"></a>  <span class="at">cambio =</span> cambio),</span>
+<span id="cb79-11"><a href="#cb79-11" aria-hidden="true" tabindex="-1"></a>  <span class="st">&quot;salidas/etapa3_insumos_presentacion.rds&quot;</span>)</span></code><button title="Copiar al portapapeles" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
 </section>
 <section id="actualización-del-objetivo-se-completa-con-los-resultados" class="level1">
 <h1>9. Actualización del objetivo (se completa con los resultados)</h1>
