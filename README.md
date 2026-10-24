@@ -6,6 +6,10 @@ Reto *Datos en el Aire* del curso Aplicación de métodos multivariados en cienc
 
 Equipo: Leonardo Leal Mendoza (A01199225), Alan Robles Gracia (A00841816), Emma Huerta Villafuerte (A01723584), Andrea Mestizo Hernández (A01735773).
 
+## Aplicación en línea
+
+La interfaz gráfica (Shiny) está publicada en **https://vhkmi1-emma-huerta0villafuerte.shinyapps.io/reto-multivariados/**. No requiere instalar nada; el código fuente está en `quarto/app/`.
+
 ## Lenguajes
 
 - **R (4.5.0) con Quarto**: todo el análisis estadístico (pasos 1 a 5) y la interfaz gráfica en Shiny.
@@ -45,7 +49,7 @@ Todos los qmd se ejecutan **con `quarto/` como directorio de trabajo**: leen los
 | 3 | `3.Modelado.qmd` | Etapa 3: PCA y conglomerados, modelos lineales con AR(1), GAM, bosque aleatorio y logística con GEE; validación 2024–2025 | `salidas/etapa2_*.rds` | `salidas/etapa3_*.csv`, `salidas/etapa3_modelos.rds`, `salidas/etapa3_insumos_presentacion.rds` |
 | 4 | `4.Presentacion.qmd` | Figuras, mapas, índice integral y GAM de PM10 para la presentación | `salidas/etapa3_*` | `presentacion/figuras/`, `presentacion/tablas/`, `salidas/etapa4_ranking_integral.csv`, `salidas/etapa4_gam_pm10.rds` |
 | 5 | `5.AjustesInformeFinal.qmd` | Comprobaciones del informe final: ACF residual, largo de bloque, interacción estación × mes, métricas de validación con IC, linealidad en el logit, GEE con pocos conglomerados, PM10 sin winsorizar, cumplimiento de la NOM y sensibilidad a la imputación | `salidas/etapa2_*`, `salidas/etapa3_*`, base concatenada | `salidas/etapa4_*.csv`, `informe/figuras/` |
-| — | `app/` | Interfaz gráfica (Shiny) que usa los modelos guardados | `salidas/etapa3_modelos.rds` y salidas del paso 4 | Aplicación interactiva |
+| — | `app/` | Interfaz gráfica (Shiny) que usa los modelos guardados | `salidas/etapa3_modelos.rds` y salidas del paso 4 | [Aplicación en línea](https://vhkmi1-emma-huerta0villafuerte.shinyapps.io/reto-multivariados/) |
 
 Notas:
 
@@ -70,7 +74,7 @@ quarto render 4.Presentacion.qmd
 quarto render 5.AjustesInformeFinal.qmd
 ```
 
-5. Para la interfaz, abrir `quarto/app/R/app.r` en RStudio y pulsar **Run App**.
+5. Para la interfaz, usar la versión publicada (enlace arriba) o, en local, abrir `quarto/app/R/app.r` en RStudio y pulsar **Run App**.
 
 ## Requisitos
 
