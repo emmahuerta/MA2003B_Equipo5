@@ -1,0 +1,25 @@
+Conjunto,estacion,Días,Tramos,Hueco máximo (días)
+Entrenamiento 2021–2023,SUR,1095,1,0
+Entrenamiento 2021–2023,SE3,1095,1,0
+Entrenamiento 2021–2023,SE,1095,1,0
+Entrenamiento 2021–2023,SO2,1095,1,0
+Entrenamiento 2021–2023,NO2,1095,1,0
+Entrenamiento 2021–2023,NTE2,1095,1,0
+Entrenamiento 2021–2023,NO,1095,1,0
+Entrenamiento 2021–2023,NE,1095,1,0
+Entrenamiento 2021–2023,NE2,1095,1,0
+Entrenamiento 2021–2023,CE,1095,1,0
+Entrenamiento 2021–2023,SO,1095,1,0
+Entrenamiento 2021–2023,SE2,1095,1,0
+Validación 2024–2025,SUR,731,1,0
+Validación 2024–2025,SE3,731,1,0
+Validación 2024–2025,SE,731,1,0
+Validación 2024–2025,SO2,731,1,0
+Validación 2024–2025,NO2,731,1,0
+Validación 2024–2025,NTE2,731,1,0
+Validación 2024–2025,NO,161,16,7
+Validación 2024–2025,NE,390,7,193
+Validación 2024–2025,NE2,366,1,0
+Validación 2024–2025,CE,731,1,0
+Validación 2024–2025,SO,469,4,117
+Validación 2024–2025,SE2,731,1,0

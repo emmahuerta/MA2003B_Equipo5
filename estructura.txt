@@ -1,0 +1,284 @@
+.
+├── .Rprofile
+├── .gitattributes
+├── .gitignore
+├── Dockerfile
+├── LICENSE
+├── MA2003B_Blank.Rproj
+├── README.md
+├── _quarto.yml
+├── data
+│   ├── BD 2020.xlsx
+│   ├── BD 2021.xlsx
+│   ├── BD 2022.xlsx
+│   ├── BD 2023.xlsx
+│   ├── BD 2024.xlsx
+│   ├── BD 2025.xlsx
+│   ├── BD 2026.xlsx
+│   ├── BD_2020_2026_concatenada.xlsx
+│   ├── Etiquetas.xlsx
+│   ├── Juntardatos.ipynb
+│   ├── Padrón medio ambiente.xlsx
+│   ├── Rangos de los parámetros del SIMA.pdf
+│   └── Ubicación de las estaciones de monitoreo.docx
+├── docs
+│   └── quarto
+│       ├── 1.ComprensionDeDatos.html
+│       ├── 2.ExploracionDescriptiva.html
+│       ├── 3.Modelado.html
+│       ├── 4.Presentacion.html
+│       ├── 5.AjustesInformeFinal.html
+│       └── reporte.docx
+├── estructura.txt
+├── quarto
+│   ├── .Rhistory
+│   ├── .test_tabs.r.swp
+│   ├── 1.ComprensionDeDatos.qmd
+│   ├── 2.ExploracionDescriptiva.qmd
+│   ├── 3.Modelado.qmd
+│   ├── 4.Presentacion.qmd
+│   ├── 5.AjustesInformeFinal.qmd
+│   ├── 5.AjustesInformeFinal.rmarkdown
+│   ├── 5.AjustesInformeFinal_files
+│   │   └── figure-html
+│   │       ├── unnamed-chunk-14-1.png
+│   │       ├── unnamed-chunk-19-1.png
+│   │       └── unnamed-chunk-9-1.png
+│   ├── app
+│   │   ├── R
+│   │   │   ├── app.r
+│   │   │   ├── global.r
+│   │   │   ├── mod_acercade.r
+│   │   │   ├── mod_escenarios.r
+│   │   │   ├── mod_estaciones.r
+│   │   │   ├── mod_estimador.r
+│   │   │   ├── mod_validacion.r
+│   │   │   ├── utils_estaciones.r
+│   │   │   ├── utils_modelos.r
+│   │   │   ├── utils_referencia.r
+│   │   │   └── utils_validacion.r
+│   │   └── www
+│   │       └── estilos.css
+│   ├── informe
+│   │   └── figuras
+│   │       ├── acf_residuos_estacion.png
+│   │       ├── diferencias_rmse.png
+│   │       ├── linealidad_logit.png
+│   │       └── rango_estacion_mes.png
+│   ├── inspeccionar_rds.r
+│   ├── presentacion
+│   │   ├── figuras
+│   │   │   ├── 01_ranking_pm25_pm10.png
+│   │   │   ├── 02_excedencias_pm25.png
+│   │   │   ├── 03_estacionalidad_mensual.png
+│   │   │   ├── 05_ranking_integral.png
+│   │   │   ├── 06_mapa_grupos.png
+│   │   │   ├── 07_mapa_indice_integral.png
+│   │   │   ├── 08_mapa_efecto_meteorologia.png
+│   │   │   ├── 11_pca_plano.png
+│   │   │   ├── 12_dendrograma.png
+│   │   │   ├── 13_silueta.png
+│   │   │   ├── 14_estabilidad_bootstrap.png
+│   │   │   ├── 15_perfil_mensual_grupos.png
+│   │   │   ├── 16_replicacion_por_anio.png
+│   │   │   ├── 18_explicada_pm25.png
+│   │   │   ├── 19_curvas_principales.png
+│   │   │   ├── 20_curvas_anexo.png
+│   │   │   ├── 21_nivel_ajustado_pm25.png
+│   │   │   ├── 22_importancia_gam_pm25.png
+│   │   │   ├── 23_nivel_ajustado_pm10.png
+│   │   │   ├── 24_explicada_pm25_pm10.png
+│   │   │   ├── 25_roc.png
+│   │   │   ├── 27_alertas_vs_detectados.png
+│   │   │   ├── 28_razones_de_momios.png
+│   │   │   ├── 30_calibracion.png
+│   │   │   └── 31_cambio_por_anio.png
+│   │   └── tablas
+│   │       ├── 00_mapa_de_modelos.csv
+│   │       ├── 00_mapa_de_modelos.png
+│   │       ├── 04_ranking_integral.csv
+│   │       ├── 04_ranking_integral.png
+│   │       ├── 09_p99_pm25_por_anio.csv
+│   │       ├── 09_p99_pm25_por_anio.png
+│   │       ├── 10_escenario_norma_2026.csv
+│   │       ├── 10_escenario_norma_2026.png
+│   │       ├── 17_tabla_grupos.csv
+│   │       ├── 17_tabla_grupos.png
+│   │       ├── 26_metricas_logistica.csv
+│   │       ├── 26_metricas_logistica.png
+│   │       ├── 29_tabla_logistica.csv
+│   │       └── 29_tabla_logistica.png
+│   ├── reporte.qmd
+│   ├── rosm.cache
+│   │   └── osm
+│   │       ├── 10_225_435.png
+│   │       ├── 10_225_436.png
+│   │       ├── 10_226_435.png
+│   │       ├── 10_226_436.png
+│   │       ├── 10_227_435.png
+│   │       └── 10_227_436.png
+│   ├── salidas
+│   │   ├── acf_pm_diario.png
+│   │   ├── cache_meteo
+│   │   │   ├── rf_CE_2020.rds
+│   │   │   ├── rf_CE_2021.rds
+│   │   │   ├── rf_CE_2022.rds
+│   │   │   ├── rf_CE_2023.rds
+│   │   │   ├── rf_CE_2024.rds
+│   │   │   ├── rf_CE_2025.rds
+│   │   │   ├── rf_CE_2026.rds
+│   │   │   ├── rf_NE2_2020.rds
+│   │   │   ├── rf_NE2_2021.rds
+│   │   │   ├── rf_NE2_2022.rds
+│   │   │   ├── rf_NE2_2023.rds
+│   │   │   ├── rf_NE2_2024.rds
+│   │   │   ├── rf_NE2_2025.rds
+│   │   │   ├── rf_NE2_2026.rds
+│   │   │   ├── rf_NE3_2021.rds
+│   │   │   ├── rf_NE3_2022.rds
+│   │   │   ├── rf_NE3_2023.rds
+│   │   │   ├── rf_NE3_2024.rds
+│   │   │   ├── rf_NE3_2025.rds
+│   │   │   ├── rf_NE3_2026.rds
+│   │   │   ├── rf_NE_2020.rds
+│   │   │   ├── rf_NE_2021.rds
+│   │   │   ├── rf_NE_2022.rds
+│   │   │   ├── rf_NE_2023.rds
+│   │   │   ├── rf_NE_2024.rds
+│   │   │   ├── rf_NE_2025.rds
+│   │   │   ├── rf_NE_2026.rds
+│   │   │   ├── rf_NO2_2020.rds
+│   │   │   ├── rf_NO2_2021.rds
+│   │   │   ├── rf_NO2_2022.rds
+│   │   │   ├── rf_NO2_2023.rds
+│   │   │   ├── rf_NO2_2024.rds
+│   │   │   ├── rf_NO2_2025.rds
+│   │   │   ├── rf_NO2_2026.rds
+│   │   │   ├── rf_NO3_2022.rds
+│   │   │   ├── rf_NO3_2023.rds
+│   │   │   ├── rf_NO3_2024.rds
+│   │   │   ├── rf_NO3_2025.rds
+│   │   │   ├── rf_NO3_2026.rds
+│   │   │   ├── rf_NO_2020.rds
+│   │   │   ├── rf_NO_2021.rds
+│   │   │   ├── rf_NO_2022.rds
+│   │   │   ├── rf_NO_2023.rds
+│   │   │   ├── rf_NO_2024.rds
+│   │   │   ├── rf_NO_2025.rds
+│   │   │   ├── rf_NO_2026.rds
+│   │   │   ├── rf_NTE2_2020.rds
+│   │   │   ├── rf_NTE2_2021.rds
+│   │   │   ├── rf_NTE2_2022.rds
+│   │   │   ├── rf_NTE2_2023.rds
+│   │   │   ├── rf_NTE2_2024.rds
+│   │   │   ├── rf_NTE2_2025.rds
+│   │   │   ├── rf_NTE2_2026.rds
+│   │   │   ├── rf_NTE_2021.rds
+│   │   │   ├── rf_NTE_2022.rds
+│   │   │   ├── rf_NTE_2023.rds
+│   │   │   ├── rf_NTE_2024.rds
+│   │   │   ├── rf_NTE_2025.rds
+│   │   │   ├── rf_NTE_2026.rds
+│   │   │   ├── rf_SE2_2020.rds
+│   │   │   ├── rf_SE2_2021.rds
+│   │   │   ├── rf_SE2_2022.rds
+│   │   │   ├── rf_SE2_2023.rds
+│   │   │   ├── rf_SE2_2024.rds
+│   │   │   ├── rf_SE2_2025.rds
+│   │   │   ├── rf_SE2_2026.rds
+│   │   │   ├── rf_SE3_2020.rds
+│   │   │   ├── rf_SE3_2021.rds
+│   │   │   ├── rf_SE3_2022.rds
+│   │   │   ├── rf_SE3_2023.rds
+│   │   │   ├── rf_SE3_2024.rds
+│   │   │   ├── rf_SE3_2025.rds
+│   │   │   ├── rf_SE3_2026.rds
+│   │   │   ├── rf_SE_2020.rds
+│   │   │   ├── rf_SE_2021.rds
+│   │   │   ├── rf_SE_2022.rds
+│   │   │   ├── rf_SE_2023.rds
+│   │   │   ├── rf_SE_2024.rds
+│   │   │   ├── rf_SE_2025.rds
+│   │   │   ├── rf_SE_2026.rds
+│   │   │   ├── rf_SO2_2020.rds
+│   │   │   ├── rf_SO2_2021.rds
+│   │   │   ├── rf_SO2_2022.rds
+│   │   │   ├── rf_SO2_2023.rds
+│   │   │   ├── rf_SO2_2024.rds
+│   │   │   ├── rf_SO2_2025.rds
+│   │   │   ├── rf_SO2_2026.rds
+│   │   │   ├── rf_SO_2020.rds
+│   │   │   ├── rf_SO_2021.rds
+│   │   │   ├── rf_SO_2022.rds
+│   │   │   ├── rf_SO_2023.rds
+│   │   │   ├── rf_SO_2024.rds
+│   │   │   ├── rf_SO_2025.rds
+│   │   │   ├── rf_SO_2026.rds
+│   │   │   ├── rf_SUR_2020.rds
+│   │   │   ├── rf_SUR_2021.rds
+│   │   │   ├── rf_SUR_2022.rds
+│   │   │   ├── rf_SUR_2023.rds
+│   │   │   ├── rf_SUR_2024.rds
+│   │   │   ├── rf_SUR_2025.rds
+│   │   │   ├── rf_SUR_2026.rds
+│   │   │   └── validacion_2020.rds
+│   │   ├── cat_calidad_aire.png
+│   │   ├── cat_estaciones.png
+│   │   ├── datos_modelo.csv
+│   │   ├── datos_modelo.rds
+│   │   ├── etapa2_catalogo_estaciones.rds
+│   │   ├── etapa2_datos_diarios.csv
+│   │   ├── etapa2_datos_diarios.rds
+│   │   ├── etapa2_datos_diarios_comunes.rds
+│   │   ├── etapa2_datos_horarios.rds
+│   │   ├── etapa2_perfil_estacional.rds
+│   │   ├── etapa3_coeficientes_m2.csv
+│   │   ├── etapa3_emmeans_estacion.csv
+│   │   ├── etapa3_emmeans_mes.csv
+│   │   ├── etapa3_grupos_estaciones.csv
+│   │   ├── etapa3_importancia_gam.csv
+│   │   ├── etapa3_importancia_logistica.csv
+│   │   ├── etapa3_importancia_variables.csv
+│   │   ├── etapa3_insumos_presentacion.rds
+│   │   ├── etapa3_modelos.rds
+│   │   ├── etapa3_nivel_ajustado_meteorologia.csv
+│   │   ├── etapa3_odds_ratios.csv
+│   │   ├── etapa3_orden_bootstrap.csv
+│   │   ├── etapa3_rangos_variables.csv
+│   │   ├── etapa3_validacion_gam.csv
+│   │   ├── etapa3_validacion_modelos.csv
+│   │   ├── etapa4_acf_residuos.csv
+│   │   ├── etapa4_comparaciones_vs_red.csv
+│   │   ├── etapa4_cumplimiento_nom.csv
+│   │   ├── etapa4_datos_diarios_pm10_original.rds
+│   │   ├── etapa4_diferencias_modelos.csv
+│   │   ├── etapa4_gam_pm10.rds
+│   │   ├── etapa4_interaccion_estacion_mes.csv
+│   │   ├── etapa4_largo_bloque.csv
+│   │   ├── etapa4_linealidad_logit.csv
+│   │   ├── etapa4_logistica_splines.csv
+│   │   ├── etapa4_m2_estructuras_correlacion.csv
+│   │   ├── etapa4_nivel_ajustado_meteorologia_pm10.csv
+│   │   ├── etapa4_or_pocos_conglomerados.csv
+│   │   ├── etapa4_pm10_sin_winsorizar.csv
+│   │   ├── etapa4_rango_estacion_mes.csv
+│   │   ├── etapa4_ranking_integral.csv
+│   │   ├── etapa4_sensibilidad_imputacion_ranking.csv
+│   │   ├── etapa4_sensibilidad_largo_bloque.csv
+│   │   ├── etapa4_tamanos_muestra.csv
+│   │   ├── etapa4_tramos.csv
+│   │   ├── etapa4_validacion_gam_pm10.csv
+│   │   ├── etapa4_validacion_gam_pm10_por_anio.csv
+│   │   ├── etapa4_validacion_metricas.csv
+│   │   └── params_escala.rds
+│   ├── test_app.r
+│   ├── test_tab1.r
+│   └── test_tabs.r
+├── renv
+│   ├── .gitignore
+│   ├── activate.R
+│   ├── settings.json
+│   └── staging
+└── renv.lock
+
+21 directories, 261 files
